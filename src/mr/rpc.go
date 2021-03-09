@@ -22,6 +22,20 @@ type ExampleReply struct {
 	Y int
 }
 
+type GetTaskReply struct {
+	TaskType int
+	FileName string
+	FileId int
+	TotalFile int
+	ReduceIndex int
+}
+
+type DoneTaskArgs struct{
+	TaskType int
+	FileName string
+	ReduceIndex int
+}
+
 // Add your RPC definitions here.
 
 

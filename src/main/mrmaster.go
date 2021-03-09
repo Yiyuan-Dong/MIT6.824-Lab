@@ -25,5 +25,6 @@ func main() {
 		time.Sleep(time.Second)
 	}
 
+	fmt.Println("All task done! Master will terminate :)")
 	time.Sleep(time.Second)
 }
