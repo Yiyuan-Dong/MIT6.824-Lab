@@ -18,8 +18,8 @@ package raft
 //
 
 import (
+	"log"
 	"math/rand"
-	"runtime"
 	"sync"
 	"time"
 )
@@ -70,10 +70,13 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	// vars create by myself...
-	state       int
-	timer       *time.Timer
-	updateState chan int
-	leaderId    int
+	cv              *sync.Cond
+	state           int
+	timer           *time.Timer
+	leaderId        int
+	flagTimeUp      int
+	flagStateUpdate int
+	flagVoteGet     int
 	// variables mentioned in Figure 2
 	currentTerm int
 	votedFor    int
@@ -179,32 +182,32 @@ type UpdateStateArgs struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	_, _ = DPrintf("[%v](%v) Get RequestVote RPC from [%v](%v)",
 		rf.me, rf.currentTerm, args.CandidateId, args.Term)
-	updateState := false
 	*reply = RequestVoteReply{Term: rf.currentTerm, VoteGranted: false}
 
 	if args.Term < rf.currentTerm {
-		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term > rf.currentTerm {
 		rf.StartNewFollowerTerm(args.Term, -1)
-		updateState = true
+		rf.flagStateUpdate++
+		rf.cv.Signal()
+
 		rf.votedFor = args.CandidateId
-		rf.ResetTimer()
+		reply.VoteGranted = true
+		rf.timer.Reset(GetRandomElapse())
+
+		return
 	}
 
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
-		rf.ResetTimer()
-	}
-
-	rf.mu.Unlock()
-	if updateState {
-		rf.updateState <- 1
+		reply.VoteGranted = true
+		rf.timer.Reset(GetRandomElapse())
 	}
 }
 
@@ -237,98 +240,96 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, me int, currentTerm int, ch chan int) {
-	DPrintf("[%v](%v) send RequestVote RPC to [%v]", me, currentTerm, server)
+func (rf *Raft) sendRequestVote(server int, me int, currentTerm int) {
+	_, _ = DPrintf("[%v](%v) send RequestVote RPC to [%v]", me, currentTerm, server)
 	args := RequestVoteArgs{Term: currentTerm, CandidateId: me}
 	var reply RequestVoteReply
 
 	ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
-	if !ok{
-		DPrintf("[%v](%v) FAIL to send RequestVote RPC to [%v]", me, currentTerm, server)
+	if !ok {
+		_, _ = DPrintf("[%v](%v) FAIL to send RequestVote RPC to [%v]", me, currentTerm, server)
 		return
 	}
 
 	rf.mu.Lock()
-	DPrintf("[%v](%v) Get RequestVote Reply from [%v](%v), he say %v",
+	defer rf.mu.Unlock()
+
+	_, _ = DPrintf("[%v](%v) Get RequestVote Reply from [%v](%v), he say %v",
 		rf.me, rf.currentTerm, server, reply.Term, reply.VoteGranted)
+
 	if reply.Term > rf.currentTerm {
 		rf.StartNewFollowerTerm(reply.Term, -1)
-		rf.mu.Unlock()
-		rf.updateState <- 1
+		rf.flagStateUpdate++
+		rf.cv.Signal()
 		return
 	}
-	rf.mu.Unlock()
 
-	if reply.VoteGranted == true {
-		ch <- 1
+	if currentTerm == rf.currentTerm && rf.state == ConstStateCandidate {
+		rf.flagVoteGet++
+		rf.cv.Signal()
 	}
 
 	return
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	updateState := false
-
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	DPrintf("[%v](%v) Get AppendEntries RPC from [%v], his term %v",
+	_, _ = DPrintf("[%v](%v) Get AppendEntries RPC from [%v], his term %v",
 		rf.me, rf.currentTerm, args.LeaderId, args.Term)
+
 	if args.Term < rf.currentTerm {
 		*reply = AppendEntriesReply{Term: rf.currentTerm, Success: false}
-		rf.mu.Unlock()
 		return
 	}
 
-	if args.Term > rf.currentTerm {
-		rf.StartNewFollowerTerm(args.Term, args.LeaderId)
-		updateState = true
-	}
-
-	if args.Term == rf.currentTerm {
-		if rf.state == ConstStateCandidate {
-			rf.state = ConstStateFollower
-			rf.leaderId = args.LeaderId
-			updateState = true
-		}
-	}
-
-	rf.ResetTimer()
 	*reply = AppendEntriesReply{Term: rf.currentTerm, Success: true}
 
-	rf.mu.Unlock()
-
-	if updateState {
-		rf.updateState <- 1
+	if args.Term > rf.currentTerm {
+		rf.StartNewFollowerTerm(args.Term, args.LeaderId)
+		rf.flagStateUpdate++
+		rf.cv.Signal()
+		return
 	}
+
+	if rf.state == ConstStateCandidate {
+		rf.state = ConstStateFollower
+		rf.leaderId = args.LeaderId
+		rf.flagStateUpdate++
+		rf.cv.Signal()
+	}
+
+	rf.timer.Reset(GetRandomElapse())
+	return
 }
 
 func (rf *Raft) sendAppendEntries(server int) {
 	rf.mu.Lock()
-	DPrintf("[%v](%v) send AppendEntries RPC to [%v]", rf.me, rf.currentTerm, server)
+	_, _ = DPrintf("[%v](%v) send AppendEntries RPC to [%v]", rf.me, rf.currentTerm, server)
 	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: -1,
 		PrevLogTerm: -1, Entries: nil, LeaderCommit: -1}
 	var reply AppendEntriesReply
 	rf.mu.Unlock()
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
-	if !ok{
-		DPrintf("[%v](%v) FAIL to send AppendEntries RPC to [%v]", rf.me, rf.currentTerm, server)
+	if !ok {
+		_, _ = DPrintf("[%v](%v) FAIL to send AppendEntries RPC to [%v]", rf.me, rf.currentTerm, server)
 		return
 	}
-
 
 	rf.mu.Lock()
-	DPrintf("[%v](%v) Get AppendEntries Reply from [%v](%v), he say %v",
+	defer rf.mu.Unlock()
+	_, _ = DPrintf("[%v](%v) Get AppendEntries Reply from [%v](%v), he say %v",
 		rf.me, rf.currentTerm, server, reply.Term, reply.Success)
+
 	if rf.currentTerm < reply.Term {
 		rf.StartNewFollowerTerm(reply.Term, -1)
-		rf.mu.Unlock()
-		rf.updateState <- 1
-		return
+		rf.flagStateUpdate++
+		rf.cv.Signal()
 	}
-	rf.mu.Unlock()
-	return
 
+	return
 }
 
 //
@@ -376,19 +377,9 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) ResetTimer() {
+func GetRandomElapse() time.Duration {
 	nsCount := ConstElectionTimeoutElapse + rand.Intn(ConstElectionTimeoutElapse)
-	rf.timer.Reset(time.Duration(nsCount) * time.Millisecond / time.Nanosecond)
-
-FOR_TIMER:
-	for {
-		select {
-		case <-rf.timer.C:
-			// Do nothing
-		default:
-			break FOR_TIMER
-		}
-	}
+	return time.Duration(nsCount) * time.Millisecond / time.Nanosecond
 }
 
 func (rf *Raft) StartNewFollowerTerm(newTerm int, leaderId int) {
@@ -408,21 +399,27 @@ func (rf *Raft) SendEmptyEntries() {
 	}
 }
 
+func (rf *Raft) ResetFlag() {
+	rf.flagStateUpdate = 0
+	rf.flagTimeUp = 0
+	rf.flagVoteGet = 0
+}
+
+func (rf *Raft) ShowFlag() {
+	_, _ = DPrintf("[%v](%v) is signaled, Flag: Time(%v), Vote(%v), Update(%v)",
+		rf.me, rf.currentTerm, rf.flagTimeUp, rf.flagVoteGet, rf.flagStateUpdate)
+}
+
 func (rf *Raft) ProcessFollower() {
 	// rf.mu.Lock() before the func
 	_, _ = DPrintf("[%v](%v) now turn into follower state\n", rf.me, rf.currentTerm)
-	rf.ResetTimer()
+	rf.ResetFlag()
 	oldTerm := rf.currentTerm
-	rf.mu.Unlock()
 
-	select {
-	case <-rf.updateState:
-		break
-	case <-rf.timer.C:
-		break
-	}
+	rf.timer.Reset(GetRandomElapse())
+	rf.cv.Wait()
+	rf.ShowFlag()
 
-	rf.mu.Lock()
 	if oldTerm == rf.currentTerm {
 		rf.state = ConstStateCandidate
 	}
@@ -433,75 +430,66 @@ func (rf *Raft) ProcessCadidate() {
 	// rf.mu.Lock() before the func
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	rf.ResetTimer()
+	rf.ResetFlag()
+	rf.flagVoteGet = 1
 	_, _ = DPrintf("[%v](%v) now turn into candidate state\n", rf.me, rf.currentTerm)
-	ch := make(chan int)
-	replyCount := 1 // I have voted for myself
-	numbers := len(rf.peers)/2 + 1
-	me := rf.me
 
+	numbers := len(rf.peers)/2 + 1
 	for index := range rf.peers {
-		if index == me {
+		if index == rf.me {
 			continue
 		}
-		go rf.sendRequestVote(index, rf.me, rf.currentTerm, ch)
+		go rf.sendRequestVote(index, rf.me, rf.currentTerm)
 	}
-	rf.mu.Unlock()
 
+	rf.timer.Reset(GetRandomElapse())
 
-FOR_CANDIDATE:
 	for {
-		select {
-		case <-rf.updateState:
-			break FOR_CANDIDATE
-		case <-ch:
-			replyCount++
-			DPrintf("[%v] count: %v", me, replyCount)
-			if replyCount == numbers {
-				break FOR_CANDIDATE
-			}
-		case <-rf.timer.C:
-			break FOR_CANDIDATE
+
+		rf.cv.Wait()
+		rf.ShowFlag()
+
+		if rf.flagStateUpdate > 0 || rf.flagTimeUp > 0 {
+			break
 		}
+		_, _ = DPrintf("[%v](%v) Count: %v", rf.me, rf.currentTerm, rf.flagVoteGet)
+		if rf.flagVoteGet >= numbers {
+			break
+		}
+		//log.Fatalf("ERROR: [%v](%v) no available flag but break!\n", rf.me, rf.currentTerm)
 	}
 
-	rf.mu.Lock()
-	if rf.state == ConstStateFollower {
+	if rf.flagStateUpdate > 0 || rf.flagTimeUp > 0 { // If time up then begin a new candidate term
 		return
 	}
 
-	if replyCount == numbers {
+	if rf.flagVoteGet >= numbers {
 		rf.state = ConstStateLeader
 		return
 	}
 
-	// Else begin a new candidate term
+	log.Fatalf("ERROR: [%v](%v) break wait but no available state!\n", rf.me, rf.currentTerm)
 	return
 }
 
 func (rf *Raft) ProcessLeader() {
 	// rf.mu.Lock() before the func
 	_, _ = DPrintf("[%v](%v) now (again) turn into leader state\n", rf.me, rf.currentTerm)
+	rf.ResetFlag()
 	rf.SendEmptyEntries()
 
 	rf.timer.Reset(ConstLeaderIdle)
-	rf.mu.Unlock()
-	defer rf.mu.Lock()
+	rf.cv.Wait()
+	rf.ShowFlag()
 
-	select {
-	case <-rf.updateState:
-		return
-	case <-rf.timer.C:
-		return
-	}
-
+	return
 }
 
 func (rf *Raft) RaftMain() {
 	rf.mu.Lock()
 	for {
 		if rf.killed() {
-			DPrintf("[%v](%v) GG! now have %v goroutine\n", rf.me, rf.currentTerm, runtime.NumGoroutine())
+			_, _ = DPrintf("[%v](%v) main goroutine gracefully exit\n", rf.me, rf.currentTerm)
 			break
 		}
 
@@ -534,19 +522,39 @@ func (rf *Raft) RaftMain() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
+
+func (rf *Raft) TimeClick() {
+	for {
+		<-rf.timer.C
+
+		rf.mu.Lock()
+		rf.cv.Signal()
+		rf.flagTimeUp++
+		if rf.killed() {
+			_, _ = DPrintf("[%v](%v) time click goroutine will exit", rf.me, rf.currentTerm)
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+	}
+}
+
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.mu = sync.Mutex{}
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.state = ConstStateFollower
-	rf.timer = time.NewTimer(100 * time.Second)
-	rf.updateState = make(chan int)
+	rf.timer = time.NewTimer(3600 * time.Second)
+	rf.cv = sync.NewCond(&rf.mu)
+
+	go rf.TimeClick()
 
 	go rf.RaftMain()
 
