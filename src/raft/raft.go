@@ -18,23 +18,22 @@ package raft
 //
 
 import (
+	"../labgob"
+	"../labrpc"
+	"bytes"
 	"log"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 )
-import "sync/atomic"
-import "../labrpc"
-
-// import "bytes"
-// import "../labgob"
 
 const (
 	ConstStateLeader           = 0
 	ConstStateFollower         = 1
 	ConstStateCandidate        = 2
-	ConstElectionTimeoutElapse = 400  // would be used as (X + rand.intn(X))
-	ConstLeaderIdle            = 200 * time.Millisecond
+	ConstElectionTimeoutElapse = 500 // would be used as (X + rand.intn(X))
+	ConstLeaderIdle            = 250 * time.Millisecond
 )
 
 //
@@ -55,9 +54,9 @@ type ApplyMsg struct {
 }
 
 type LogStruct struct {
-	Term    	 int
-	Command      interface{}
-	NoOpOffset   int
+	Term       int
+	Command    interface{}
+	NoOpOffset int
 }
 
 //
@@ -83,9 +82,9 @@ type Raft struct {
 	applyCh         chan ApplyMsg
 	isSending       []bool
 	// variables mentioned in Figure 2
-	currentTerm int
-	votedFor    int
-	log         []LogStruct
+	currentTerm int         //Persist
+	votedFor    int         //Persist
+	log         []LogStruct //Persist
 	commitIndex int
 	lastApplied int
 	nextIndex   []int
@@ -101,23 +100,28 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == ConstStateLeader
 }
 
-func (rf *Raft) GetLastIndex() int{
+func (rf *Raft) GetLastIndex() int {
 	return len(rf.log) - 1
 }
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
+	_, _ = DPrintf("[%v](%v) will persist", rf.me, rf.currentTerm)
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currentTerm) != nil ||
+		e.Encode(rf.votedFor) != nil ||
+		e.Encode(rf.log) != nil {
+		log.Fatal("Error while encode")
+	}
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -127,19 +131,21 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	//Your code here (2C).
+	//Example:
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor int
+	var logs []LogStruct
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&logs) != nil {
+		log.Fatal("Error while decode")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = logs
+	}
 }
 
 func Min(x, y int) int {
@@ -216,7 +222,7 @@ func (rf *Raft) TestUpToDate(lastIndex int, lastTerm int) bool {
 func (rf *Raft) AppendAndSetOffset(command interface{}) {
 	lastIndex := len(rf.log) - 1
 	offset := rf.log[lastIndex].NoOpOffset
-	if lastIndex > 0 && rf.log[lastIndex].Command == nil{
+	if lastIndex > 0 && rf.log[lastIndex].Command == nil {
 		offset++
 	}
 	rf.log = append(rf.log, LogStruct{Command: command, Term: rf.currentTerm, NoOpOffset: offset})
@@ -241,9 +247,11 @@ func (rf *Raft) AppendLogs(index int, logs []LogStruct) {
 func (rf *Raft) ApplyLogs() {
 	if rf.commitIndex > rf.lastApplied {
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-			if rf.log[i].Command == nil { continue }
-			_, _ = DPrintf("[%v](%v) has applied logs at %v, tell them %v",
-				rf.me, rf.currentTerm, i, i - rf.log[i].NoOpOffset)
+			if rf.log[i].Command == nil {
+				continue
+			}
+			_, _ = DPrintf("[%v](%v) has applied %v at %v, tell them %v",
+				rf.me, rf.currentTerm, rf.log[i].Command, i, i-rf.log[i].NoOpOffset)
 			rf.applyCh <- ApplyMsg{Command: rf.log[i].Command,
 				CommandIndex: i - rf.log[i].NoOpOffset, CommandValid: true}
 		}
@@ -274,6 +282,9 @@ func (rf *Raft) LeaderCommitUpdate() {
 		if count >= number {
 			rf.commitIndex = TestIndex
 			rf.ApplyLogs()
+			// Immediately tell followers new commit. Help to pass test?
+			rf.flagTimeUp++
+			rf.cv.Signal()
 			return
 		}
 	}
@@ -300,6 +311,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.flagStateUpdate++
 		rf.cv.Signal()
 		reply.Term = rf.currentTerm
+		rf.persist()
 	}
 
 	if rf.TestUpToDate(args.LastLogIndex, args.LastLogTerm) &&
@@ -308,6 +320,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		// If grant vote, reset timer
 		rf.timer.Reset(GetRandomElapse())
+		rf.persist()
 	}
 }
 
@@ -352,7 +365,7 @@ func (rf *Raft) sendRequestVote(server, me, currentTerm, lastIndex, lastTerm int
 			if rf.killed() {
 				return
 			}
-			_, _ = DPrintf("[%v](%v) FAIL to send RequestVote RPC to [%v]", me, currentTerm, server)
+			_, _ = DPrintf("[%v](%v) fail to send RequestVote RPC to [%v]", me, currentTerm, server)
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
@@ -367,6 +380,7 @@ func (rf *Raft) sendRequestVote(server, me, currentTerm, lastIndex, lastTerm int
 		rf.StartNewFollowerTerm(reply.Term, -1)
 		rf.flagStateUpdate++
 		rf.cv.Signal()
+		rf.persist()
 		return
 	}
 
@@ -382,8 +396,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	_, _ = DPrintf("[%v](%v) Get AppendEntries RPC from [%v](%v)",
-		rf.me, rf.currentTerm, args.LeaderId, args.Term)
+	_, _ = DPrintf("[%v](%v) Get AppendEntries RPC from [%v](%v). [%v:%v]",
+		rf.me, rf.currentTerm, args.LeaderId, args.Term, args.PrevLogIndex+1, args.PrevLogIndex+1+len(args.Entries))
 
 	*reply = AppendEntriesReply{Term: rf.currentTerm, Success: false, LastIndex: len(rf.log) - 1}
 
@@ -398,6 +412,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.flagStateUpdate++
 		rf.cv.Signal()
 		reply.Term = rf.currentTerm
+		rf.persist()
 	}
 
 	if rf.state == ConstStateCandidate {
@@ -426,6 +441,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	rf.AppendLogs(args.PrevLogIndex+1, args.Entries)
+	rf.persist()
+
 	reply.Success = true
 
 	if args.LeaderCommit > rf.commitIndex {
@@ -441,12 +458,15 @@ func (rf *Raft) sendAppendEntries(server int) {
 	defer rf.mu.Unlock()
 
 	if rf.isSending[server] || rf.state != ConstStateLeader {
+		DPrintf("[%v](%v) Try append entries ot [%v], but is sending", rf.me, rf.currentTerm, server)
 		return
 	}
 	rf.isSending[server] = true
 	defer func() { rf.isSending[server] = false }()
+	currentTerm := rf.currentTerm
 
 	for {
+		//_, _ = DPrintf("[%v](%v) send AppendEntries RPC to [%v]", rf.me, rf.currentTerm, server)
 		prevIndex := rf.nextIndex[server] - 1
 		prevLogTerm := rf.log[prevIndex].Term
 
@@ -469,7 +489,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 					rf.mu.Lock()
 					return
 				}
-				_, _ = DPrintf("[%v](%v) FAIL to send AppendEntries RPC to [%v]", rf.me, rf.currentTerm, server)
+				_, _ = DPrintf("[%v](%v) fail to send AppendEntries RPC to [%v]", rf.me, rf.currentTerm, server)
 				time.Sleep(100 * time.Millisecond)
 			}
 		}
@@ -482,10 +502,11 @@ func (rf *Raft) sendAppendEntries(server int) {
 			rf.StartNewFollowerTerm(reply.Term, -1)
 			rf.flagStateUpdate++
 			rf.cv.Signal()
+			rf.persist()
 			return
 		}
 
-		if rf.state != ConstStateLeader {
+		if rf.state != ConstStateLeader || currentTerm != rf.currentTerm{
 			return
 		}
 
@@ -534,9 +555,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	rf.AppendAndSetOffset(command)
+	rf.persist()
+
 	retIndex := rf.GetLastIndex() - rf.log[rf.GetLastIndex()].NoOpOffset
-	_, _ = DPrintf("[%v](%v) Get command %v, return %v, actually %v",
-		rf.me, rf.currentTerm, command, retIndex, len(rf.log) - 1)
+	_, _ = DPrintf("[%v](%v) Get command %v, save at %v, tell them %v",
+		rf.me, rf.currentTerm, command, len(rf.log)-1, retIndex)
+
 	rf.SendEntries()
 	rf.timer.Reset(ConstLeaderIdle)
 
@@ -620,6 +644,7 @@ func (rf *Raft) ProcessCadidate() {
 	rf.votedFor = rf.me
 	rf.ResetFlag()
 	rf.flagVoteGet = 1
+	rf.persist()
 	_, _ = DPrintf("[%v](%v) now turn into candidate state\n", rf.me, rf.currentTerm)
 
 	numbers := len(rf.peers)/2 + 1
@@ -663,8 +688,9 @@ func (rf *Raft) ProcessLeader() {
 	// rf.mu.Lock() before the func
 	_, _ = DPrintf("[%v](%v) now turn into leader state\n", rf.me, rf.currentTerm)
 	rf.AppendAndSetOffset(nil) // no-op entry in the paper
+	rf.persist()
 	for i := 0; i < len(rf.peers); i++ {
-		rf.matchIndex[i] = 0            // In the paper index begin from 1, so initialized to 0
+		rf.matchIndex[i] = 0 // In the paper index begin from 1, so initialized to 0
 		rf.nextIndex[i] = len(rf.log)
 	}
 
@@ -751,10 +777,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	rf.me = me
 	rf.mu = sync.Mutex{}
-	// Your initialization code here (2A, 2B, 2C).
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 	rf.state = ConstStateFollower
 	rf.timer = time.NewTimer(3600 * time.Second)
 	rf.cv = sync.NewCond(&rf.mu)
@@ -763,6 +785,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.log = []LogStruct{{Term: 0, Command: nil, NoOpOffset: 0}}
 	rf.votedFor = -1
+	rf.currentTerm = 0
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
+	rf.mu.Lock()
+	if len(rf.log) > 1 {
+		_, _ = DPrintf("[%v](%v): votedFor: %v, log: %v",
+			me, rf.currentTerm, rf.votedFor, rf.log)
+	}
+
+	rf.mu.Unlock()
+
 	go rf.TimeClick()
 
 	go rf.RaftMain()
