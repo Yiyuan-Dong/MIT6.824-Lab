@@ -33,8 +33,8 @@ const (
 	ConstStateLeader           = 0
 	ConstStateFollower         = 1
 	ConstStateCandidate        = 2
-	ConstElectionTimeoutElapse = 500
-	ConstLeaderIdle            = 250 * time.Millisecond
+	ConstElectionTimeoutElapse = 400  // would be used as (X + rand.intn(X))
+	ConstLeaderIdle            = 200 * time.Millisecond
 )
 
 //
