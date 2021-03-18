@@ -32,8 +32,8 @@ const (
 	ConstStateLeader           = 0
 	ConstStateFollower         = 1
 	ConstStateCandidate        = 2
-	ConstElectionTimeoutElapse = 500 // would be used as (X + rand.intn(X))
-	ConstLeaderIdle            = 250 * time.Millisecond
+	ConstElectionTimeoutElapse = 400 // would be used as (X + rand.intn(X))
+	ConstLeaderIdle            = 200 * time.Millisecond
 )
 
 //
@@ -81,6 +81,7 @@ type Raft struct {
 	flagVoteGet     int
 	applyCh         chan ApplyMsg
 	isSending       []bool
+	appendOpId      int
 	// variables mentioned in Figure 2
 	currentTerm int         //Persist
 	votedFor    int         //Persist
@@ -457,19 +458,21 @@ func (rf *Raft) sendAppendEntries(server int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.isSending[server] || rf.state != ConstStateLeader {
-		DPrintf("[%v](%v) Try append entries ot [%v], but is sending", rf.me, rf.currentTerm, server)
+	//if rf.isSending[server] || rf.state != ConstStateLeader {
+	//	DPrintf("[%v](%v) Try append entries ot [%v], but is sending", rf.me, rf.currentTerm, server)
+	//	return
+	//}
+	//rf.isSending[server] = true
+	//defer func() { rf.isSending[server] = false }()
+	if rf.state != ConstStateLeader {
 		return
 	}
-	rf.isSending[server] = true
-	defer func() { rf.isSending[server] = false }()
 	currentTerm := rf.currentTerm
 
 	for {
 		//_, _ = DPrintf("[%v](%v) send AppendEntries RPC to [%v]", rf.me, rf.currentTerm, server)
 		prevIndex := rf.nextIndex[server] - 1
 		prevLogTerm := rf.log[prevIndex].Term
-
 		entries := rf.log[rf.nextIndex[server]:]
 
 		_, _ = DPrintf("[%v](%v) send AppendEntries RPC to [%v], [%v:%v]",
@@ -506,20 +509,24 @@ func (rf *Raft) sendAppendEntries(server int) {
 			return
 		}
 
-		if rf.state != ConstStateLeader || currentTerm != rf.currentTerm{
+		if currentTerm != rf.currentTerm {
 			return
 		}
 
 		if reply.Success {
-			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-			rf.nextIndex[server] += len(args.Entries)
+			rf.matchIndex[server] = Max(rf.matchIndex[server], args.PrevLogIndex+len(args.Entries))
+			rf.nextIndex[server] = Max(rf.nextIndex[server], prevIndex+1+len(args.Entries))
 			_, _ = DPrintf("[%v](%v) Server: %v, matchIndex: %v, nextIndex: %v",
 				rf.me, rf.currentTerm, server, rf.matchIndex[server], rf.nextIndex[server])
 		} else {
+			if rf.matchIndex[server] >= args.PrevLogIndex {
+				return
+			}
+
 			if reply.LastIndex < args.PrevLogIndex {
-				rf.nextIndex[server] = reply.LastIndex + 1
+				rf.nextIndex[server] = Min(rf.nextIndex[server], reply.LastIndex+1)
 			} else {
-				rf.nextIndex[server] -= reply.XLen
+				rf.nextIndex[server] = Min(rf.nextIndex[server], prevIndex+1-reply.XLen)
 			}
 		}
 
@@ -561,8 +568,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	_, _ = DPrintf("[%v](%v) Get command %v, save at %v, tell them %v",
 		rf.me, rf.currentTerm, command, len(rf.log)-1, retIndex)
 
-	rf.SendEntries()
-	rf.timer.Reset(ConstLeaderIdle)
+	rf.timer.Reset(40 * time.Millisecond)
 
 	return retIndex, rf.currentTerm, true
 
@@ -786,6 +792,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = []LogStruct{{Term: 0, Command: nil, NoOpOffset: 0}}
 	rf.votedFor = -1
 	rf.currentTerm = 0
+	rf.appendOpId = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
