@@ -7,6 +7,7 @@ import "math/big"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
+	clerkId int64  // use a int64 random number to identify a clerk
 	// You will have to modify this struct.
 }
 
@@ -20,6 +21,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.clerkId = nrand()
 	// You'll have to add code here.
 	return ck
 }

@@ -483,8 +483,10 @@ func (rf *Raft) sendAppendEntries(server int) {
 		//_, _ = DPrintf("[%v](%v) send AppendEntries RPC to [%v]", rf.me, rf.currentTerm, server)
 		prevIndex := rf.nextIndex[server] - 1
 		prevLogTerm := rf.log[prevIndex].Term
-		entries := rf.log[rf.nextIndex[server]:]
+		entries := make([]LogStruct, len(rf.log) - rf.nextIndex[server])
+		copy(entries, rf.log[rf.nextIndex[server]:])
 		me := rf.me
+		peerServer := rf.peers[server]
 
 		_, _ = DPrintf("[%v](%v) send AppendEntries RPC to [%v], [%v:%v]",
 			rf.me, rf.currentTerm, server, rf.nextIndex[server], len(rf.log))
@@ -497,7 +499,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 
 		ok := false
 		for !ok {
-			ok = rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
+			ok = peerServer.Call("Raft.AppendEntries", &args, &reply)
 			if !ok {
 				if rf.killed() {
 					rf.mu.Lock()
@@ -655,7 +657,7 @@ func (rf *Raft) ProcessFollower() {
 	return
 }
 
-func (rf *Raft) ProcessCadidate() {
+func (rf *Raft) ProcessCandidate() {
 	// rf.mu.Lock() before the func
 	rf.currentTerm++
 	rf.votedFor = rf.me
@@ -744,7 +746,7 @@ func (rf *Raft) RaftMain() {
 		}
 
 		if rf.state == ConstStateCandidate {
-			rf.ProcessCadidate()
+			rf.ProcessCandidate()
 			continue
 		}
 
