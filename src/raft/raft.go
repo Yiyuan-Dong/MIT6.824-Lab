@@ -98,7 +98,17 @@ func (rf *Raft) GetState() (int, bool) {
 	//var Term int
 	//var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	return rf.currentTerm, rf.state == ConstStateLeader
+}
+
+func (rf *Raft) GetLeaderId() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	return rf.leaderId
 }
 
 func (rf *Raft) GetLastIndex() int {
@@ -474,6 +484,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 		prevIndex := rf.nextIndex[server] - 1
 		prevLogTerm := rf.log[prevIndex].Term
 		entries := rf.log[rf.nextIndex[server]:]
+		me := rf.me
 
 		_, _ = DPrintf("[%v](%v) send AppendEntries RPC to [%v], [%v:%v]",
 			rf.me, rf.currentTerm, server, rf.nextIndex[server], len(rf.log))
@@ -492,7 +503,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 					rf.mu.Lock()
 					return
 				}
-				_, _ = DPrintf("[%v](%v) fail to send AppendEntries RPC to [%v]", rf.me, rf.currentTerm, server)
+				_, _ = DPrintf("[%v](%v) fail to send AppendEntries RPC to [%v]", me, currentTerm, server)
 				time.Sleep(100 * time.Millisecond)
 			}
 		}

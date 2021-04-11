@@ -4,6 +4,9 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
+	OpStringPut    = "Put"
+	OpStringAppend = "Append"
+	OpStringGet    = "Get"
 )
 
 type Err string
