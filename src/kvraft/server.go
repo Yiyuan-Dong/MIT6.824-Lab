@@ -214,7 +214,6 @@ func (kv *KVServer) killed() bool {
 
 func (kv *KVServer) ControlDaemon(){
 	kv.mu.Lock()
-	timer := time.NewTimer(TimeGap)
 	_, _ = DPrintf("{%v} begin!", kv.me)
 
 	for {
@@ -225,50 +224,36 @@ func (kv *KVServer) ControlDaemon(){
 			return
 		}
 
-		DPrintf("0")
-		select {
-		case applyMsg := <-kv.applyCh:
-			kv.mu.Lock()
-			DPrintf("{%v} 1", kv.me)
-			timer.Reset(TimeGap)
-			op := applyMsg.Command.(Op)
-			logId := LogId{clerkId: op.ClerkId, clerkIndex: op.ClerkIndex}
+		applyMsg := <-kv.applyCh
+		kv.mu.Lock()
 
-			_, ok := kv.logSet[logId]
-			if !ok{
-				kv.logSet[logId] = true
-				switch op.OpString{
-				case OpStringAppend:
-					kv.kvMap[op.Key] = kv.kvMap[op.Key] + op.Value
-				case OpStringPut:
-					kv.kvMap[op.Key] = op.Value
-				default:
-				}
+		if !applyMsg.IsLeader && len(kv.waitingCV) > 0{
+			DPrintf("{%v} is no longer leader", kv.me)
+			for _, v := range kv.waitingCV{
+				v.Signal()
 			}
+			kv.waitingCV = map[LogId]*sync.Cond{}
+		}
 
-			DPrintf("{%v} 2", kv.me)
-			cv, ok := kv.waitingCV[logId]
-			if ok{
-				cv.Signal()
-				delete(kv.waitingCV, logId)
-			}
+		op := applyMsg.Command.(Op)
+		logId := LogId{clerkId: op.ClerkId, clerkIndex: op.ClerkIndex}
 
-		case <-timer.C:
-			DPrintf("-1")
-			kv.mu.Lock()
-			DPrintf("{%v} 3", kv.me)
-			timer.Reset(TimeGap)
-			DPrintf("{%v} 6", kv.me)
-			_, isLeader := kv.rf.GetState()
-			DPrintf("{%v} 7", kv.me)
-			if isLeader != true && len(kv.waitingCV) > 0{
-				DPrintf("{%v} is no longer leader!", kv.me)
-				for _, v := range kv.waitingCV{
-					v.Signal()
-				}
-				kv.waitingCV = map[LogId]*sync.Cond{}
+		_, ok := kv.logSet[logId]
+		if !ok{  // if is not duplicated log, apply it
+			kv.logSet[logId] = true
+			switch op.OpString{
+			case OpStringAppend:
+				kv.kvMap[op.Key] = kv.kvMap[op.Key] + op.Value
+			case OpStringPut:
+				kv.kvMap[op.Key] = op.Value
+			default:
 			}
-			DPrintf("{%v} 4", kv.me)
+		}
+
+		cv, ok := kv.waitingCV[logId]
+		if ok{
+			cv.Signal()
+			delete(kv.waitingCV, logId)
 		}
 	}
 }

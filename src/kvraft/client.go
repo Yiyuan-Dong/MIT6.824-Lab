@@ -8,8 +8,8 @@ import (
 import "crypto/rand"
 import "math/big"
 
-const TryGap = 200 * time.Millisecond
-const TimeWaiting = 300000 * time.Millisecond
+const TryGap = 50 * time.Millisecond
+const TimeWaiting = 500 * time.Millisecond
 
 type Clerk struct {
 	servers 	[]*labrpc.ClientEnd
@@ -62,16 +62,38 @@ func (ck *Clerk) Get(key string) string {
 	timer := time.NewTimer(TimeWaiting)
 	_, _ = DPrintf("(%v) clerk get \"%v\" : first to server {%v}", ck.clerkId, key, ck.lastLeader)
 
+	go func() {
+		for {
+			ck.mu.Lock()
+			if flag {
+				ck.mu.Unlock()
+				return
+			}
+			timer.Reset(TimeWaiting)
+			ck.mu.Unlock()
+
+			<- timer.C
+
+			ck.mu.Lock()
+			cv.Signal()
+			ck.mu.Unlock()
+		}
+	}()
+
 	for {
-		time.Sleep(TryGap)
 		args := GetArgs{ClerkId: ck.clerkId, Key: key, Index: ck.index}
 		reply := GetReply{}
+
+		ck.mu.Lock()
+		timer.Reset(TimeWaiting)
+		ck.mu.Unlock()
 
 		go func(serverId int) {
 			ok := ck.servers[serverId].Call("KVServer.Get", &args, &reply)
 
 			ck.mu.Lock()
 			defer ck.mu.Unlock()
+
 			if ok {
 				switch reply.Err {
 				case OK:
@@ -102,14 +124,6 @@ func (ck *Clerk) Get(key string) string {
 
 			cv.Signal()
 		}(i)
-
-		go func(){
-			timer.Reset(TimeWaiting)
-			<- timer.C
-			ck.mu.Lock()
-			cv.Signal()
-			ck.mu.Unlock()
-		}()
 
 		cv.Wait()
 
@@ -146,16 +160,39 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	timer := time.NewTimer(TimeWaiting)
 	_, _ = DPrintf("(%v) clerk %v (%v:%v) : first to server {%v}", ck.clerkId, op, key, value, ck.lastLeader)
 
+	go func() {
+		for {
+			ck.mu.Lock()
+			if flag {
+				ck.mu.Unlock()
+				return
+			}
+			timer.Reset(TimeWaiting)
+			ck.mu.Unlock()
+
+			<- timer.C
+
+			ck.mu.Lock()
+			cv.Signal()
+			ck.mu.Unlock()
+		}
+	}()
+
 	for {
 		args := PutAppendArgs{ClerkId: ck.clerkId, Key: key, Index: ck.index, Value: value, Op: op}
 		reply := PutAppendReply{}
+
+		ck.mu.Lock()
+		timer.Reset(TimeWaiting)
+		ck.mu.Unlock()
 
 		go func(serverId int) {
 			ok := ck.servers[serverId].Call("KVServer.PutAppend", &args, &reply)
 
 			ck.mu.Lock()
 			defer ck.mu.Unlock()
-			if ok && reply.Err == OK{
+
+			if ok{
 				switch reply.Err{
 				case OK:
 					flag = true
@@ -178,14 +215,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 			cv.Signal()
 		}(i)
-
-		go func() {
-			timer.Reset(TimeWaiting)
-			<- timer.C
-			ck.mu.Lock()
-			cv.Signal()
-			ck.mu.Unlock()
-		}()
 
 		cv.Wait()
 
