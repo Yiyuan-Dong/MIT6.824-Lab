@@ -83,10 +83,7 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		args := GetArgs{ClerkId: ck.clerkId, Key: key, Index: ck.index}
 		reply := GetReply{}
-
-		ck.mu.Lock()
 		timer.Reset(TimeWaiting)
-		ck.mu.Unlock()
 
 		go func(serverId int) {
 			ok := ck.servers[serverId].Call("KVServer.Get", &args, &reply)
@@ -181,10 +178,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		args := PutAppendArgs{ClerkId: ck.clerkId, Key: key, Index: ck.index, Value: value, Op: op}
 		reply := PutAppendReply{}
-
-		ck.mu.Lock()
 		timer.Reset(TimeWaiting)
-		ck.mu.Unlock()
 
 		go func(serverId int) {
 			ok := ck.servers[serverId].Call("KVServer.PutAppend", &args, &reply)

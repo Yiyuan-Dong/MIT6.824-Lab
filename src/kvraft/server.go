@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const Debug = 1
+const Debug = 0
 const TimeGap = 100 * time.Millisecond
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -56,18 +56,20 @@ type KVServer struct {
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	DPrintf("GET")
+	_, isLeader := kv.rf.GetState()  // Take care! Need to avoid deadlock
+
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 
-	DPrintf("{%v} Get request \"%v\"", kv.me, args.Key)
+	me := kv.me
+	DPrintf("{%v} Get request \"%v\"", me, args.Key)
 
-	_, isLeader := kv.rf.GetState()
 	if !isLeader{
-		DPrintf("{%v} Get : Not leader", kv.me)
+		DPrintf("{%v} Get : Not leader", me)
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	} else {
-		DPrintf("{%v} Get : Is leader", kv.me)
+		DPrintf("{%v} Get : Is leader", me)
 	}
 
 	opCommand := Op{ClerkId:args.ClerkId, ClerkIndex: args.Index,
@@ -76,7 +78,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	_, ok := kv.logSet[logId]  // Read log has already kept in. directly return keeps linealizability
 	if ok{
-		DPrintf("{%v} Get : Already in", kv.me)
+		DPrintf("{%v} Get : Already in", me)
 		value, ok := kv.kvMap[args.Key]
 		if ok {
 			reply.Err = OK
@@ -84,18 +86,25 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		} else {
 			reply.Err = ErrNoKey
 		}
+		kv.mu.Unlock()
 		return
 	}
 
 	_, ok = kv.waitingCV[logId]
+
+	kv.mu.Unlock()
+
 	if !ok{
-		DPrintf("{%v} Get : add log", kv.me)
-		_, _, _ = kv.rf.Start(opCommand)
+		DPrintf("{%v} Get : add log", me)
+		_, _, _ = kv.rf.Start(opCommand)  // Take care! Need to avoid deadlock
 	} else {
-		DPrintf("{%v} Get : Is trying, plz wait", kv.me)
+		DPrintf("{%v} Get : Is trying, plz wait", me)
 		reply.Err = ErrTrying
 		return
 	}
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 
 	cv := sync.NewCond(&kv.mu)
 	kv.waitingCV[logId] = cv
@@ -105,7 +114,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	_, ok = kv.logSet[logId]
 	reply.Value = ""
 	if ok {
-		DPrintf("{%v} Get : Success", kv.me)
+		DPrintf("{%v} Get : Success", me)
 		value, ok := kv.kvMap[args.Key]
 		if ok {
 			reply.Err = OK
@@ -114,7 +123,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = ErrNoKey
 		}
 	} else {
-		DPrintf("{%v} Get : Fail", kv.me)
+		DPrintf("{%v} Get : Fail", me)
 		reply.Err = ErrWrongLeader
 	}
 
@@ -124,18 +133,20 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	DPrintf("PUTAPPEND")
+	_, isLeader := kv.rf.GetState()  // Take care! Need to avoid deadlock
+
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 
-	DPrintf("{%v} PutAppend: (%v:%v)", kv.me, args.Key, args.Value)
+	me := kv.me
+	DPrintf("{%v} PutAppend: (%v:%v)", me, args.Key, args.Value)
 
-	_, isLeader := kv.rf.GetState()
 	if !isLeader{
-		DPrintf("{%v} PutAppend : Not leader", kv.me)
+		DPrintf("{%v} PutAppend : Not leader", me)
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	} else {
-		DPrintf("{%v} PutAppend : Is leader", kv.me)
+		DPrintf("{%v} PutAppend : Is leader", me)
 	}
 
 	opCommand := Op{ClerkId:args.ClerkId, ClerkIndex: args.Index,
@@ -144,20 +155,27 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	_, ok := kv.logSet[logId]
 	if ok{
-		DPrintf("{%v} PutAppend : Already In", kv.me)
+		DPrintf("{%v} PutAppend : Already In", me)
 		reply.Err = OK
+		kv.mu.Unlock()
 		return
 	}
 
 	_, ok = kv.waitingCV[logId]
+
+	kv.mu.Unlock()
+
 	if !ok {
-		DPrintf("{%v} PutAppend : Start command", kv.me)
-		_, _, _ = kv.rf.Start(opCommand)
+		DPrintf("{%v} PutAppend : Start command", me)
+		_, _, _ = kv.rf.Start(opCommand)  // Take care! Need to avoid deadlock
 	} else {
-		DPrintf("{%v} PutAppend : Is trying, plz wait", kv.me)
+		DPrintf("{%v} PutAppend : Is trying, plz wait", me)
 		reply.Err = ErrTrying
 		return
 	}
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 
 	cv := sync.NewCond(&kv.mu)
 	kv.waitingCV[logId] = cv
@@ -166,10 +184,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	_, ok = kv.logSet[logId]
 	if ok {
-		DPrintf("{%v} PutAppend : Success", kv.me)
+		DPrintf("{%v} PutAppend : Success", me)
 		reply.Err = OK
 	} else {
-		DPrintf("{%v} PutAppend : Fail", kv.me)
+		DPrintf("{%v} PutAppend : Fail", me)
 		reply.Err = ErrWrongLeader
 	}
 
