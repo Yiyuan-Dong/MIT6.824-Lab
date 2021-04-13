@@ -1,14 +1,23 @@
 package kvraft
 
-import "../labrpc"
+import (
+	"../labrpc"
+	"sync"
+	"time"
+)
 import "crypto/rand"
 import "math/big"
 
+const TryGap = 200 * time.Millisecond
+const TimeWaiting = 300000 * time.Millisecond
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	clerkId int64  // use a int64 random number to identify a clerk
+	servers 	[]*labrpc.ClientEnd
 	// You will have to modify this struct.
+	clerkId 	int64  // use a int64 random number to identify a clerk
+	index   	int
+	lastLeader  int
+	mu          sync.Mutex
 }
 
 func nrand() int64 {
@@ -22,6 +31,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	ck.clerkId = nrand()
+	ck.index = 0
+	ck.lastLeader = 0
+	ck.mu = sync.Mutex{}
 	// You'll have to add code here.
 	return ck
 }
@@ -39,9 +51,78 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 
-	// You will have to modify this function.
-	return ""
+	ck.index++
+	i := ck.lastLeader
+	cv := sync.NewCond(&ck.mu)
+	flag := false
+	result := ""
+	timer := time.NewTimer(TimeWaiting)
+	_, _ = DPrintf("(%v) clerk get \"%v\" : first to server {%v}", ck.clerkId, key, ck.lastLeader)
+
+	for {
+		time.Sleep(TryGap)
+		args := GetArgs{ClerkId: ck.clerkId, Key: key, Index: ck.index}
+		reply := GetReply{}
+
+		go func(serverId int) {
+			ok := ck.servers[serverId].Call("KVServer.Get", &args, &reply)
+
+			ck.mu.Lock()
+			defer ck.mu.Unlock()
+			if ok {
+				switch reply.Err {
+				case OK:
+					flag = true
+					result = reply.Value
+					ck.lastLeader = serverId
+					_, _ = DPrintf("(%v) clerk get \"%v\" : return \"%v\"",
+						ck.clerkId, key, reply.Value)
+				case ErrNoKey:
+					flag = true
+					result = ""
+					ck.lastLeader = serverId
+					_, _ = DPrintf("(%v) clerk get \"%v\" : return No KEY ERROR",
+						ck.clerkId, key)
+				case ErrTrying:
+					ck.lastLeader = serverId
+					_, _ = DPrintf("(%v) clerk get \"%v\" : is trying",
+						ck.clerkId, key)
+					return  // No need to cv.Signal(), we need to wait
+				case ErrWrongLeader:
+					_, _ = DPrintf("(%v) clerk get \"%v\" : Wrong leader",
+						ck.clerkId, key)
+				}
+			} else {
+				_, _ = DPrintf("(%v) clerk get \"%v\" : RPC failed",
+					ck.clerkId, key)
+			}
+
+			cv.Signal()
+		}(i)
+
+		go func(){
+			timer.Reset(TimeWaiting)
+			<- timer.C
+			ck.mu.Lock()
+			cv.Signal()
+			ck.mu.Unlock()
+		}()
+
+		cv.Wait()
+
+		if !flag{
+			i = (i + 1) % len(ck.servers)
+			//ck.index++   // For get, each log should be a new log
+			_, _ = DPrintf("(%v) clerk get \"%v\" : turn to server {%v}", ck.clerkId, key, i)
+			time.Sleep(TryGap)
+			continue
+		} else {
+			return result
+		}
+	}
 }
 
 //
@@ -55,7 +136,68 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	ck.index++
+	i := ck.lastLeader
+	flag := false
+	cv := sync.NewCond(&ck.mu)
+	timer := time.NewTimer(TimeWaiting)
+	_, _ = DPrintf("(%v) clerk %v (%v:%v) : first to server {%v}", ck.clerkId, op, key, value, ck.lastLeader)
+
+	for {
+		args := PutAppendArgs{ClerkId: ck.clerkId, Key: key, Index: ck.index, Value: value, Op: op}
+		reply := PutAppendReply{}
+
+		go func(serverId int) {
+			ok := ck.servers[serverId].Call("KVServer.PutAppend", &args, &reply)
+
+			ck.mu.Lock()
+			defer ck.mu.Unlock()
+			if ok && reply.Err == OK{
+				switch reply.Err{
+				case OK:
+					flag = true
+					ck.lastLeader = serverId
+					_, _ = DPrintf("(%v) clerk %v (%v:%v) : Done!",
+						ck.clerkId, op, key, value)
+				case ErrTrying:
+					ck.lastLeader = serverId
+					_, _ = DPrintf("(%v) clerk %v (%v:%v) : Server is trying",
+						ck.clerkId, op, key, value)
+					return  // No need to cv.Signal(), we need to wait
+				case ErrWrongLeader:
+					_, _ = DPrintf("(%v) clerk %v (%v:%v) : Wrong leader",
+						ck.clerkId, op, key, value)
+				}
+			} else {
+				_, _ = DPrintf("(%v) clerk %v (%v:%v) : RPC failed!",
+					ck.clerkId, op, key, value)
+			}
+
+			cv.Signal()
+		}(i)
+
+		go func() {
+			timer.Reset(TimeWaiting)
+			<- timer.C
+			ck.mu.Lock()
+			cv.Signal()
+			ck.mu.Unlock()
+		}()
+
+		cv.Wait()
+
+		if !flag{
+			i = (i + 1) % len(ck.servers)
+			_, _ = DPrintf("(%v) clerk %v (%v:%v) : turn to server [%v]", ck.clerkId, op, key, value, i)
+			time.Sleep(TryGap)
+			continue
+		} else {
+			return
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

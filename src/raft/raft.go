@@ -51,6 +51,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	IsLeader     bool
 }
 
 type LogStruct struct {
@@ -219,6 +220,9 @@ type UpdateStateArgs struct {
 	LeaderId int
 }
 
+/**
+ * When someone request for a vote, test if he is update enough
+ */
 func (rf *Raft) TestUpToDate(lastIndex int, lastTerm int) bool {
 	myLastTerm := rf.log[len(rf.log)-1].Term
 	if lastTerm < myLastTerm {
@@ -263,13 +267,17 @@ func (rf *Raft) ApplyLogs() {
 			}
 			_, _ = DPrintf("[%v](%v) has applied %v at %v, tell them %v",
 				rf.me, rf.currentTerm, rf.log[i].Command, i, i-rf.log[i].NoOpOffset)
-			rf.applyCh <- ApplyMsg{Command: rf.log[i].Command,
-				CommandIndex: i - rf.log[i].NoOpOffset, CommandValid: true}
+			rf.applyCh <- ApplyMsg{Command: rf.log[i].Command, CommandIndex: i - rf.log[i].NoOpOffset,
+				CommandValid: true, IsLeader: rf.state == ConstStateLeader}
 		}
 	}
 	rf.lastApplied = rf.commitIndex
 }
 
+/**
+ * Whenever a follower says he record some logs, leader should
+ * consider whether I can commit more log
+ */
 func (rf *Raft) LeaderCommitUpdate() {
 	if rf.state != ConstStateLeader {
 		return
@@ -740,19 +748,13 @@ func (rf *Raft) RaftMain() {
 			break
 		}
 
-		if rf.state == ConstStateFollower {
+		switch rf.state{
+		case ConstStateFollower:
 			rf.ProcessFollower()
-			continue
-		}
-
-		if rf.state == ConstStateCandidate {
+		case ConstStateCandidate:
 			rf.ProcessCandidate()
-			continue
-		}
-
-		if rf.state == ConstStateLeader {
+		case ConstStateLeader:
 			rf.ProcessLeader()
-			continue
 		}
 	}
 	rf.mu.Unlock()
