@@ -4,7 +4,7 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
-	ErrTrying      = "ErrTrying"
+	ErrOldRequest  = "ErrOldRequest"
 	OpStringPut    = "Put"
 	OpStringAppend = "Append"
 	OpStringGet    = "Get"

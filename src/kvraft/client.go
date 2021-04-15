@@ -31,7 +31,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	ck.clerkId = nrand()
-	ck.index = 0
+	ck.index = 1
+
 	ck.lastLeader = 0
 	ck.mu = sync.Mutex{}
 	// You'll have to add code here.
@@ -105,7 +106,7 @@ func (ck *Clerk) Get(key string) string {
 					ck.lastLeader = serverId
 					_, _ = DPrintf("(%v) clerk get \"%v\" : return No KEY ERROR",
 						ck.clerkId, key)
-				case ErrTrying:
+				case ErrOldRequest:
 					ck.lastLeader = serverId
 					_, _ = DPrintf("(%v) clerk get \"%v\" : is trying",
 						ck.clerkId, key)
@@ -193,7 +194,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					ck.lastLeader = serverId
 					_, _ = DPrintf("(%v) clerk %v (%v:%v) : Done!",
 						ck.clerkId, op, key, value)
-				case ErrTrying:
+				case ErrOldRequest:
 					ck.lastLeader = serverId
 					_, _ = DPrintf("(%v) clerk %v (%v:%v) : Server is trying",
 						ck.clerkId, op, key, value)

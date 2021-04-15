@@ -286,7 +286,7 @@ func (rf *Raft) LeaderCommitUpdate() {
 	number := len(rf.peers)/2 + 1
 	for TestIndex := len(rf.log) - 1; TestIndex > rf.commitIndex; TestIndex-- {
 		count := 1
-		if rf.log[TestIndex].Term != rf.currentTerm {
+		if rf.log[TestIndex].Term != rf.currentTerm {  // Not commit older term
 			return
 		}
 		for i, severMatchIndex := range rf.matchIndex {
@@ -730,14 +730,12 @@ func (rf *Raft) ProcessLeader() {
 		rf.cv.Wait()
 		rf.ShowFlag()
 		if rf.flagStateUpdate > 0 {
-			break
+			return
 		}
 		if rf.killed() {
 			return
 		}
 	}
-
-	return
 }
 
 func (rf *Raft) RaftMain() {
