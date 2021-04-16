@@ -4,6 +4,7 @@ import (
 	"../labgob"
 	"../labrpc"
 	"../raft"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -319,7 +320,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	return kv
 }
 
-func (kv *KVServer) persist(){
-
+func (kv *KVServer) EncodeSnapShot() []byte{
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(kv.kvMap) != nil ||
+		e.Encode(kv.lastAppliedIndex) != nil{
+		log.Fatal("Error while encoding")
+	}
+	data := w.Bytes()
+	return data
 }
 
