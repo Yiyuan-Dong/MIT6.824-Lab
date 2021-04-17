@@ -52,6 +52,7 @@ type KVServer struct {
 	lastAppliedIndex   map[int64]int   // persist
 	lastWaitingIndex   map[int64]int
 	lastWaitingCV      map[int64]*sync.Cond
+	persister          *raft.Persister
 	//commitIndex     int
 }
 
@@ -67,6 +68,16 @@ func (kv *KVServer) GenerateGetResult(key string, reply *GetReply){
 	}
 }
 
+func TimeOutRoutine(cv *sync.Cond){
+	// 这里有点复杂要用中文...
+	// 本来的设计是如果applyCh说我已经不是leader了，那么Signal()所有的
+	// CV。但是有一种情况是:我写了几个log，新leader来了覆盖了这些log，但是
+	// 还没有来得及apply我又当回了leader。这时候CV没有被提醒，用超时Signal()机制
+	timer := time.NewTimer(2 * time.Second)
+	<- timer.C
+	cv.Signal()
+}
+
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	DPrintf("GET")
@@ -79,7 +90,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	clerkId := args.ClerkId
 	index := args.Index
 	key := args.Key
-	DPrintf("{%v} Get request \"%v\"", me, key)
+	DPrintf("{%v} Get request \"%v\" clerk:%v, index:%v",
+		me, key, clerkId, index)
 
 	if !isLeader{
 		DPrintf("{%v} Get : Not leader", me)
@@ -125,6 +137,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	cv := sync.NewCond(&kv.mu)
 	kv.lastWaitingCV[args.ClerkId] = cv
 
+	go TimeOutRoutine(cv)
+
 	cv.Wait()
 
 	reply.Value = ""
@@ -132,6 +146,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.GenerateGetResult(key, reply)
 	} else {
 		DPrintf("{%v} Get : Fail", me)
+		if kv.lastWaitingIndex[clerkId] == index{
+			kv.lastWaitingIndex[clerkId] -= 1  // Now I'm failed and I'm not waiting
+		}
 		reply.Err = ErrWrongLeader
 	}
 
@@ -151,7 +168,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	index := args.Index
 	key := args.Key
 	value := args.Value
-	DPrintf("{%v} PutAppend: (%v:%v)", me, args.Key, args.Value)
+	DPrintf("{%v} PutAppend: (%v:%v) clerk:%v, index:%v",
+		me, key, value, clerkId, index)
 
 	if !isLeader{
 		DPrintf("{%v} PutAppend : Not leader", me)
@@ -168,6 +186,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	if kv.lastWaitingIndex[clerkId] >= index{
 		DPrintf("{%v} Get : Is trying or later request comes", me)
+		DPrintf("{%v} %v", me, kv.lastWaitingIndex)
 		reply.Err = ErrOldRequest
 		return
 	}
@@ -175,7 +194,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.lastWaitingCV[args.ClerkId].Signal()
 	}
 	kv.lastWaitingCV[args.ClerkId] = nil
-	kv.lastWaitingIndex[args.ClerkId] = args.Index
+	kv.lastWaitingIndex[args.ClerkId] = index
 
 	kv.mu.Unlock()
 
@@ -200,13 +219,18 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	cv := sync.NewCond(&kv.mu)
 	kv.lastWaitingCV[clerkId] = cv
 
+	go TimeOutRoutine(cv)
+
 	cv.Wait()
 
 	if kv.lastAppliedIndex[clerkId] >= index {
-		DPrintf("{%v} PutAppend : Success", me)
+		DPrintf("{%v} PutAppend (%v:%v): Success", me, key, value)
 		reply.Err = OK
 	} else {
-		DPrintf("{%v} PutAppend : Fail", me)
+		DPrintf("{%v} PutAppend (%v:%v): Fail", me, key, value)
+		if kv.lastWaitingIndex[clerkId] == index{
+			kv.lastWaitingIndex[clerkId] -= 1  // Now I'm failed and I'm not waiting
+		}
 		reply.Err = ErrWrongLeader
 	}
 
@@ -264,6 +288,12 @@ func (kv *KVServer) ControlDaemon(){
 
 		kv.mu.Lock()
 
+		if applyMsg.Snapshot != nil{
+			DPrintf("{%v} read snapshot", kv.me)
+			kv.readSnapshot(applyMsg.Snapshot)
+			continue
+		}
+
 		DPrintf("{%v} apply log [%v] : %v", kv.me, applyMsg.CommandIndex, applyMsg.Command)
 
 		if !applyMsg.IsLeader {
@@ -292,6 +322,12 @@ func (kv *KVServer) ControlDaemon(){
 			kv.lastWaitingCV[op.ClerkId].Signal()
 			kv.lastWaitingCV[op.ClerkId] = nil
 		}
+
+		if kv.maxraftstate > 0 &&
+			kv.persister.RaftStateSize() > kv.maxraftstate * 3 / 4{
+			DPrintf("{%v} will delete from %v", kv.me, applyMsg.CommandIndex)
+			kv.rf.SaveSnapshot(applyMsg.CommandIndex, kv.EncodeSnapShot())
+		}
 	}
 }
 
@@ -309,10 +345,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	kv.persister = persister
 	kv.kvMap = map[string]string{}
 	kv.lastWaitingCV = map[int64]*sync.Cond{}
 	kv.lastWaitingIndex = map[int64]int{}
 	kv.lastAppliedIndex = map[int64]int{}
+	kv.readSnapshot(kv.persister.ReadSnapshot())
 
 	go kv.ControlDaemon()
 	// You may need initialization code here.
@@ -331,3 +369,21 @@ func (kv *KVServer) EncodeSnapShot() []byte{
 	return data
 }
 
+func (kv *KVServer) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var kvMap map[string]string
+	var lastAppliedINdex map[int64]int
+
+	if d.Decode(&kvMap) != nil ||
+		d.Decode(&lastAppliedINdex) != nil {
+		log.Fatal("Error while decode")
+	} else {
+		kv.kvMap = kvMap
+		kv.lastAppliedIndex = lastAppliedINdex
+	}
+}
