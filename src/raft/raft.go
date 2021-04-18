@@ -32,7 +32,7 @@ const (
 	ConstStateLeader           = 0
 	ConstStateFollower         = 1
 	ConstStateCandidate        = 2
-	ConstElectionTimeoutElapse = 400 // would be used as (X + rand.intn(X))
+	ConstElectionTimeoutElapse = 500 // would be used as (X + rand.intn(X))
 	ConstLeaderIdle            = 200 * time.Millisecond
 	ConstRetryGap              = 200 * time.Millisecond
 )
@@ -249,11 +249,12 @@ type UpdateStateArgs struct {
  * When someone request for a vote, test if he is update enough
  */
 func (rf *Raft) TestUpToDate(lastIndex int, lastTerm int) bool {
+	myLastIndex := len(rf.log) - 1 + rf.deleteLogNum
 	myLastTerm := rf.log[len(rf.log)-1].Term
 	if lastTerm < myLastTerm {
 		return false
 	}
-	if lastTerm == myLastTerm && lastIndex < len(rf.log)-1+rf.deleteLogNum {
+	if lastTerm == myLastTerm && lastIndex < myLastIndex {
 		return false
 	}
 	return true
@@ -394,17 +395,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.StartNewFollowerTerm(args.Term, -1)
 		rf.flagStateUpdate++
 		rf.cv.Signal()
-		reply.Term = rf.currentTerm
 		rf.persist()
 	}
 
-	if rf.TestUpToDate(args.LastLogIndex, args.LastLogTerm) &&
-		(rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
-		rf.votedFor = args.CandidateId
-		reply.VoteGranted = true
-		// If grant vote, reset timer
-		rf.timer.Reset(GetRandomElapse())
-		rf.persist()
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+		if rf.TestUpToDate(args.LastLogIndex, args.LastLogTerm){
+			rf.votedFor = args.CandidateId
+			reply.VoteGranted = true
+			// If grant vote, reset timer
+			rf.timer.Reset(GetRandomElapse())
+			rf.persist()
+		}
 	}
 }
 
@@ -453,7 +454,18 @@ func (rf *Raft) sendRequestVote(server, me, currentTerm, lastIndex, lastTerm int
 			if rf.killed() {
 				return
 			}
+
 			_, _ = DPrintf("[%v](%v) fail to send RequestVote RPC to [%v]", me, currentTerm, server)
+
+			rf.mu.Lock()
+
+			if rf.currentTerm != currentTerm || rf.state != ConstStateCandidate{
+				rf.mu.Unlock()
+				return
+			}
+
+			rf.mu.Unlock()
+
 			time.Sleep(ConstRetryGap)
 		}
 	}
@@ -570,10 +582,14 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		Success: false,
 		LastApplied: rf.lastApplied}
 
-	if args.DeleteLogNum - 1 < rf.lastApplied{
+
+	if args.Term < rf.currentTerm {
 		return
 	}
-	if args.Term < rf.currentTerm {
+
+	rf.timer.Reset(GetRandomElapse())
+
+	if args.DeleteLogNum - 1 < rf.lastApplied{
 		return
 	}
 	if args.Term == rf.currentTerm &&
@@ -587,7 +603,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.persister.SaveStateAndSnapshot(args.State, args.Snapshot)
 	rf.readPersist(args.State)
-	rf.timer.Reset(GetRandomElapse())
+
+	_, _ = DPrintf("[%v](%v) : log: %v, deleteLogNum: %v",
+		rf.me, rf.currentTerm, rf.log, rf.deleteLogNum)
 
 	rf.commitIndex = Max(rf.commitIndex, rf.deleteLogNum-1)
 	rf.needSnapshot += 1
@@ -618,6 +636,10 @@ func (rf *Raft) SendAppendOrSnapshot(server int) {
 	currentTerm := rf.currentTerm
 
 	for {
+		if rf.killed(){
+			return
+		}
+
 		me := rf.me
 		peerServer := rf.peers[server]
 
@@ -644,8 +666,10 @@ func (rf *Raft) SendAppendOrSnapshot(server int) {
 			rf.mu.Lock()
 
 			if !ok {
-				_, _ = DPrintf("[%v](%v) fail to send InstallSnapshot RPC to [%v]",
-					me, currentTerm, server)
+				if !rf.killed(){
+					_, _ = DPrintf("[%v](%v) fail to send InstallSnapshot RPC to [%v]",
+						me, currentTerm, server)
+				}
 				return
 			}
 
@@ -705,7 +729,10 @@ func (rf *Raft) SendAppendOrSnapshot(server int) {
 			rf.mu.Lock()
 
 			if !ok {
-				_, _ = DPrintf("[%v](%v) fail to send AppendEntries RPC to [%v]", me, currentTerm, server)
+				if !rf.killed(){
+					_, _ = DPrintf("[%v](%v) fail to send AppendEntries RPC to [%v]",
+						me, currentTerm, server)
+				}
 				return
 			}
 
@@ -761,11 +788,13 @@ func (rf *Raft) SendAppendOrSnapshot(server int) {
 				return
 			}
 		}
+
+		time.Sleep(40 * time.Millisecond)
 	}
 
 }
 
-//
+// Start
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next Command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -801,7 +830,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 }
 
-//
+// Kill
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -1027,7 +1056,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		_, _ = DPrintf("[%v](%v): restart, votedFor: %v, log: %v, deleteLogNum: %v, ",
 			me, rf.currentTerm, rf.votedFor, rf.log, rf.deleteLogNum)
 	} else {
-		_, _ = DPrintf("[%v](%v): pure start", me, rf.currentTerm)
+		_, _ = DPrintf("[%v](%v): start from nothing", me, rf.currentTerm)
 	}
 
 	rf.mu.Unlock()
