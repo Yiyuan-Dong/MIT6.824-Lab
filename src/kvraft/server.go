@@ -53,6 +53,7 @@ type KVServer struct {
 	lastWaitingIndex map[int64]int
 	lastWaitingCV    map[int64]*sync.Cond
 	persister        *raft.Persister
+	daemonCount      int
 	//commitIndex     int
 }
 
@@ -293,7 +294,7 @@ func (kv *KVServer) ControlDaemon() {
 			continue
 		}
 
-		DPrintf("{%v} apply log [%v] : %v", kv.me, applyMsg.CommandIndex, applyMsg.Command)
+		DPrintf("{%v} apply log [%v]: %v", kv.me, applyMsg.CommandIndex, applyMsg.Command)
 
 		if !applyMsg.IsLeader {
 			for k, v := range kv.lastWaitingCV {
@@ -325,7 +326,14 @@ func (kv *KVServer) ControlDaemon() {
 		if kv.maxraftstate > 0 &&
 			kv.persister.RaftStateSize() > kv.maxraftstate*3/4 {
 			DPrintf("{%v} will delete from %v", kv.me, applyMsg.CommandIndex)
-			kv.rf.SaveSnapshot(applyMsg.CommandIndex, kv.EncodeSnapShot())
+			ret := kv.rf.SaveSnapshot(applyMsg.CommandIndex, kv.EncodeSnapShot())
+			if ret{
+				DPrintf("{%v} delete success, state: kvMap: %v, lastAppliedIndex: %v",
+					kv.me, kv.kvMap, kv.lastAppliedIndex)
+			} else {
+				DPrintf("{%v} delete failed", kv.me)
+			}
+
 		}
 	}
 }

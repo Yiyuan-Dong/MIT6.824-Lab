@@ -286,16 +286,21 @@ func (rf *Raft) AppendLogs(index int, logs []LogStruct) { // here index has (- r
 }
 
 func (rf *Raft) ApplyLogs() {
-	if rf.commitIndex > rf.lastApplied && !rf.isApplying {
+	if rf.commitIndex > rf.lastApplied {
 		go func() {
 			rf.mu.Lock()
-			rf.isApplying = true
 			defer rf.mu.Unlock()
+
+			if rf.isApplying{
+				return
+			}
+			rf.isApplying = true
 			defer func() { rf.isApplying = false }()
 
 			for {
 				if rf.needSnapshot > 0 {
 					applyMsg := ApplyMsg{Snapshot: rf.persister.ReadSnapshot()}
+					DPrintf("[%v](%v) will send snapshot up", rf.me, rf.currentTerm)
 					rf.mu.Unlock()
 
 					rf.applyCh <- applyMsg
@@ -589,7 +594,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.timer.Reset(GetRandomElapse())
 
-	if args.DeleteLogNum - 1 < rf.lastApplied{
+	if args.DeleteLogNum - 1 < rf.lastApplied{  // You can just append entries
 		return
 	}
 	if args.Term == rf.currentTerm &&
@@ -597,6 +602,16 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.log[len(rf.log) - 1].Term == rf.currentTerm{ // This snapshot is old
 		return
 	}
+	if args.Term > rf.currentTerm{
+		rf.flagStateUpdate++
+		rf.cv.Signal()
+	}
+	if rf.state != ConstStateFollower {
+		rf.state = ConstStateFollower
+		rf.flagStateUpdate++
+		rf.cv.Signal()
+	}
+	rf.leaderId = args.LeaderId
 
 	reply.Success = true
 	_, _ = DPrintf("[%v](%v) will install snapshot", rf.me, rf.currentTerm)
@@ -604,18 +619,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.persister.SaveStateAndSnapshot(args.State, args.Snapshot)
 	rf.readPersist(args.State)
 
-	_, _ = DPrintf("[%v](%v) : log: %v, deleteLogNum: %v",
+	_, _ = DPrintf("[%v](%v) after install: log: %v, deleteLogNum: %v",
 		rf.me, rf.currentTerm, rf.log, rf.deleteLogNum)
 
 	rf.commitIndex = Max(rf.commitIndex, rf.deleteLogNum-1)
 	rf.needSnapshot += 1
 
-	if rf.state != ConstStateFollower {
-		rf.state = ConstStateFollower
-		rf.flagStateUpdate++
-	}
-	rf.leaderId = args.LeaderId
-	rf.cv.Signal()
 	rf.persist()
 
 	if args.LeaderCommit > rf.commitIndex {
@@ -754,8 +763,9 @@ func (rf *Raft) SendAppendOrSnapshot(server int) {
 			if reply.Success {
 				rf.matchIndex[server] = Max(rf.matchIndex[server], prevIndex+len(args.Entries))
 				rf.nextIndex[server] = Max(rf.nextIndex[server], prevIndex+1+len(args.Entries))
-				_, _ = DPrintf("[%v](%v) Server: %v, matchIndex: %v, nextIndex: %v",
-					rf.me, rf.currentTerm, server, rf.matchIndex[server], rf.nextIndex[server])
+				_, _ = DPrintf("[%v](%v) Server: %v, matchIndex: %v, nextIndex: %v, my lastIndex: %v",
+					rf.me, rf.currentTerm, server, rf.matchIndex[server],
+					rf.nextIndex[server], len(rf.log) - 1 + rf.deleteLogNum)
 			} else {
 				if rf.matchIndex[server] >= args.PrevLogIndex {
 					return
@@ -783,8 +793,8 @@ func (rf *Raft) SendAppendOrSnapshot(server int) {
 				}
 			}
 
+			rf.LeaderCommitUpdate()
 			if rf.matchIndex[server] == len(rf.log)+rf.deleteLogNum-1 {
-				rf.LeaderCommitUpdate()
 				return
 			}
 		}
@@ -1068,7 +1078,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func (rf *Raft) Delete(index int) {
+func (rf *Raft) Delete(index int) int{
 	realIndex := -1
 	for i := 0; i < len(rf.log); i++ {
 		if i+rf.deleteLogNum-rf.log[i].NoOpOffset == index &&
@@ -1077,30 +1087,36 @@ func (rf *Raft) Delete(index int) {
 		}
 	}
 
-	if rf.lastApplied-rf.deleteLogNum < realIndex {
-		// TODO: Can I delete it?
-		// 这里情况有亿点点复杂，还是用中文吧
-		// 如果在我apply了一个log之后，我又InstallSnapShot，这时我的lastApplied
-		// 会被重置为rf.DeleteLogNum - 1。但是KVServer可能会根据之前apply的log让我
-		// 删掉lastApplied之后的log，这时不能删
-		log.Fatalf("[%v] %v %v %v", rf.me, rf.lastApplied, rf.deleteLogNum, realIndex)
-		return
-	}
+	//if rf.lastApplied-rf.deleteLogNum < realIndex {
+	//	// TODO: Can I delete it?
+	//	// 这里情况有亿点点复杂，还是用中文吧
+	//	// 如果在我apply了一个log之后，我又InstallSnapShot，这时我的lastApplied
+	//	// 会被重置为rf.DeleteLogNum - 1。但是KVServer可能会根据之前apply的log让我
+	//	// 删掉lastApplied之后的log，这时不能删
+	//	log.Fatalf("[%v] %v %v %v", rf.me, rf.lastApplied, rf.deleteLogNum, realIndex)
+	//	return
+	//}
 
-	if realIndex >= 1 {
-		realIndex -= 1 // keep at least one log
+	realIndex -= 1 // keep at least one log
+	if realIndex >= 0 {
 		rf.deleteLogNum += 1 + realIndex
-		DPrintf("[%v](%v) delete from %v(real:%v), deleteNum: %v",
+		_, _ = DPrintf("[%v](%v) delete from %v(real:%v), deleteNum: %v",
 			rf.me, rf.currentTerm, index, realIndex, rf.deleteLogNum)
 		rf.log = rf.log[realIndex+1:]
+		rf.persist()
 	}
-	rf.persist()
+
+	return realIndex
 }
 
-func (rf *Raft) SaveSnapshot(index int, snapshot []byte) {
+func (rf *Raft) SaveSnapshot(index int, snapshot []byte) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.Delete(index)
-	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), snapshot)
+	realIndex := rf.Delete(index)
+	if realIndex >= 0{
+		rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), snapshot)
+		return true
+	}
+	return false
 }
