@@ -30,6 +30,8 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+
+	// (ClerkId, ClerkIndex) is used to uniquely identify an Op
 	ClerkId    int64
 	ClerkIndex int
 	Key        string
@@ -53,13 +55,12 @@ type KVServer struct {
 	lastWaitingIndex map[int64]int
 	lastWaitingCV    map[int64]*sync.Cond
 	persister        *raft.Persister
-	daemonCount      int
 	//commitIndex     int
 }
 
 func (kv *KVServer) GenerateGetResult(key string, reply *GetReply) {
 	// Should lock and unlock outside
-	_, _ = DPrintf("{%v} Get : Success", kv.me)
+	_, _ = DPrintf("{%v} Get (%v): Success", kv.me, key)
 	value, ok := kv.kvMap[key]
 	if ok {
 		reply.Err = OK
@@ -73,7 +74,9 @@ func TimeOutRoutine(cv *sync.Cond) {
 	// 这里有点复杂要用中文...
 	// 本来的设计是如果applyCh说我已经不是leader了，那么Signal()所有的
 	// CV。但是有一种情况是:我写了几个log，新leader来了覆盖了这些log，但是
-	// 还没有来得及apply我又当回了leader。这时候CV没有被提醒，用超时Signal()机制
+	// 还没有来得及apply我又当回了leader。这时候CV没有被提醒，[]waitingIndex
+	// 没有被改变使得这个log明明没有在广播却也不能重新让leader广播。这时候就
+	// 需要超时Signal()机制
 	timer := time.NewTimer(2 * time.Second)
 	<-timer.C
 	cv.Signal()
@@ -90,48 +93,48 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	clerkId := args.ClerkId
 	index := args.Index
 	key := args.Key
-	DPrintf("{%v} (%v) Get clerk:%v, index:%v",
+	DPrintf("{%v} Get (%v): clerk:%v, index:%v",
 		me, key, clerkId, index)
 
 	if !isLeader {
-		DPrintf("{%v} (%v) Get : Not leader", me, key)
+		DPrintf("{%v} Get (%v): Not leader", me, key)
 		reply.Err = ErrWrongLeader
 		return
 	} else {
-		DPrintf("{%v} (%v) Get : Is leader", me, key)
+		DPrintf("{%v} Get (%v): Is leader", me, key)
 	}
 
-	if kv.lastAppliedIndex[clerkId] >= args.Index {
+	if kv.lastAppliedIndex[clerkId] >= index {
 		kv.GenerateGetResult(key, reply)
 		return
 	}
 	if kv.lastWaitingIndex[clerkId] >= index {
-		DPrintf("{%v} (%v) Get : Is trying or later request comes", me, key)
+		DPrintf("{%v} Get (%v): Is trying or later request comes", me, key)
 		reply.Err = ErrOldRequest
 		return
 	}
-	if kv.lastWaitingCV[args.ClerkId] != nil {
-		kv.lastWaitingCV[args.ClerkId].Signal()
+	if kv.lastWaitingCV[clerkId] != nil {
+		kv.lastWaitingCV[clerkId].Signal()
 	}
-	kv.lastWaitingCV[args.ClerkId] = nil
-	kv.lastWaitingIndex[args.ClerkId] = args.Index
+	kv.lastWaitingCV[clerkId] = nil
+	kv.lastWaitingIndex[clerkId] = index
 
-	DPrintf("{%v} (%v) Get : add log", me, key)
+	DPrintf("{%v} Get (%v): add log", me, key)
 	opCommand := Op{ClerkId: clerkId, ClerkIndex: index,
-		Key: args.Key, Value: "", OpString: OpStringGet}
-	_, _, _ = kv.rf.Start(opCommand) // Take care! Need to avoid deadlock
+		Key: key, Value: "", OpString: OpStringGet}
+	_, _, _ = kv.rf.Start(opCommand)
 
 	if kv.lastAppliedIndex[clerkId] >= index {
-		kv.GenerateGetResult(args.Key, reply)
+		kv.GenerateGetResult(key, reply)
 		return
 	}
 	if kv.lastWaitingIndex[clerkId] > index {
-		DPrintf("{%v} (%v) Get : later request comes", me, key)
+		DPrintf("{%v} Get (%v): later request comes", me, key)
 		reply.Err = ErrOldRequest
 		return
 	}
 	cv := sync.NewCond(&kv.mu)
-	kv.lastWaitingCV[args.ClerkId] = cv
+	kv.lastWaitingCV[clerkId] = cv
 
 	go TimeOutRoutine(cv)
 
@@ -141,7 +144,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	if kv.lastAppliedIndex[clerkId] >= index {
 		kv.GenerateGetResult(key, reply)
 	} else {
-		DPrintf("{%v} (%v) Get : Fail", me, key)
+		DPrintf("{%v} Get (%v): Fail", me, key)
 		if kv.lastWaitingIndex[clerkId] == index {
 			kv.lastWaitingIndex[clerkId] -= 1 // Now I'm failed and I'm not waiting
 		}
@@ -157,58 +160,58 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.mu.Unlock()
 
 	// Your code here.
-	_, isLeader := kv.rf.GetState() // Take care! Need to avoid deadlock
+	_, isLeader := kv.rf.GetState()
 
 	me := kv.me
 	clerkId := args.ClerkId
 	index := args.Index
 	key := args.Key
 	value := args.Value
-	DPrintf("{%v} (%v:%v) PutAppend: clerk:%v, index:%v",
+	DPrintf("{%v} PutAppend (%v:%v): clerk:%v, index:%v",
 		me, key, value, clerkId, index)
 
 	if !isLeader {
-		DPrintf("{%v} (%v:%v) PutAppend : Not leader",
+		DPrintf("{%v} PutAppend (%v:%v): Not leader",
 			me, key, value)
 		reply.Err = ErrWrongLeader
 		return
 	} else {
-		DPrintf("{%v} (%v:%v) PutAppend : Is leader",
+		DPrintf("{%v} PutAppend (%v:%v): Is leader",
 			me, key, value)
 	}
 
 	if kv.lastAppliedIndex[clerkId] >= index {
-		DPrintf("{%v} (%v:%v) PutAppend : Already done",
+		DPrintf("{%v} PutAppend (%v:%v): Already done",
 			me, key, value)
 		reply.Err = OK
 		return
 	}
 	if kv.lastWaitingIndex[clerkId] >= index {
-		DPrintf("{%v} (%v:%v) PutAppend : Is trying or later request comes",
+		DPrintf("{%v} PutAppend (%v:%v): Is trying or later request comes",
 			me, key, value)
 		reply.Err = ErrOldRequest
 		return
 	}
-	if kv.lastWaitingCV[args.ClerkId] != nil {
-		kv.lastWaitingCV[args.ClerkId].Signal()
+	if kv.lastWaitingCV[clerkId] != nil {
+		kv.lastWaitingCV[clerkId].Signal()
 	}
-	kv.lastWaitingCV[args.ClerkId] = nil
-	kv.lastWaitingIndex[args.ClerkId] = index
+	kv.lastWaitingCV[clerkId] = nil
+	kv.lastWaitingIndex[clerkId] = index
 
-	DPrintf("{%v} (%v:%v) PutAppend : Start command",
+	DPrintf("{%v} PutAppend (%v:%v): will Start command",
 		me, key, value)
 	opCommand := Op{ClerkId: clerkId, ClerkIndex: index,
 		Key: key, Value: value, OpString: args.Op}
-	_, _, _ = kv.rf.Start(opCommand) // Take care! Need to avoid deadlock
+	_, _, _ = kv.rf.Start(opCommand)
 
 	if kv.lastAppliedIndex[clerkId] >= index {
-		DPrintf("{%v} (%v:%v) PutAppend : Success",
+		DPrintf("{%v} PutAppend (%v:%v): Success",
 			me, key, value)
 		reply.Err = OK
 		return
 	}
 	if kv.lastWaitingIndex[clerkId] > index {
-		DPrintf("{%v} (%v:%v) PutAppend : Later request comes",
+		DPrintf("{%v} PutAppend (%v:%v): Later request comes",
 			me, key, value)
 		reply.Err = ErrOldRequest
 		return
@@ -222,10 +225,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	cv.Wait()
 
 	if kv.lastAppliedIndex[clerkId] >= index {
-		DPrintf("{%v} (%v:%v) PutAppend: Success", me, key, value)
+		DPrintf("{%v} PutAppend (%v:%v): Success", me, key, value)
 		reply.Err = OK
 	} else {
-		DPrintf("{%v} (%v:%v) PutAppend: Fail", me, key, value)
+		DPrintf("{%v} PutAppend (%v:%v): Fail", me, key, value)
 		if kv.lastWaitingIndex[clerkId] == index {
 			kv.lastWaitingIndex[clerkId] -= 1 // Now I'm failed and I'm not waiting
 		}
@@ -277,11 +280,10 @@ func (kv *KVServer) ControlDaemon() {
 
 	for {
 		kv.mu.Unlock()
+
 		if kv.killed() {
-			_, _ = DPrintf("Bye~~")
 			return
 		}
-
 		applyMsg := <-kv.applyCh
 
 		kv.mu.Lock()
@@ -289,7 +291,7 @@ func (kv *KVServer) ControlDaemon() {
 		if applyMsg.Snapshot != nil {
 			DPrintf("{%v} read snapshot", kv.me)
 			kv.readSnapshot(applyMsg.Snapshot)
-			DPrintf("{%v} : kvMap: %v, lastAppliedIndex: %v",
+			DPrintf("{%v} state after install: kvMap: %v, lastAppliedIndex: %v",
 				kv.me, kv.kvMap, kv.lastAppliedIndex)
 			continue
 		}

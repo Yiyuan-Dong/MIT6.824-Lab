@@ -1087,16 +1087,6 @@ func (rf *Raft) Delete(index int) int{
 		}
 	}
 
-	//if rf.lastApplied-rf.deleteLogNum < realIndex {
-	//	// TODO: Can I delete it?
-	//	// 这里情况有亿点点复杂，还是用中文吧
-	//	// 如果在我apply了一个log之后，我又InstallSnapShot，这时我的lastApplied
-	//	// 会被重置为rf.DeleteLogNum - 1。但是KVServer可能会根据之前apply的log让我
-	//	// 删掉lastApplied之后的log，这时不能删
-	//	log.Fatalf("[%v] %v %v %v", rf.me, rf.lastApplied, rf.deleteLogNum, realIndex)
-	//	return
-	//}
-
 	realIndex -= 1 // keep at least one log
 	if realIndex >= 0 {
 		rf.deleteLogNum += 1 + realIndex
