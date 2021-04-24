@@ -100,22 +100,22 @@ func (sm *ShardMaster) Solve(clerkId int64, index int,
 
 	me := sm.me
 
-	DPrintf("{%v} %v: clerk:%v, index:%v",
+	_, _ = DPrintf("{%v} %v: clerk:%v, index:%v",
 		me, logString, clerkId, index)
 
 	if !isLeader {
-		DPrintf("{%v} %v: Not leader", me, logString)
+		_, _ = DPrintf("{%v} %v: Not leader", me, logString)
 		return ErrWrongLeader
 	} else {
-		DPrintf("{%v} %v: Is leader", me, logString)
+		_, _ = DPrintf("{%v} %v: Is leader", me, logString)
 	}
 
 	if sm.lastAppliedIndex[clerkId] >= index {
-		DPrintf("{%v} %v: Already done", me, logString)
+		_, _ = DPrintf("{%v} %v: Already done", me, logString)
 		return OK
 	}
 	if sm.lastWaitingIndex[clerkId] >= index {
-		DPrintf("{%v} %v: Is trying or later request comes",
+		_, _ = DPrintf("{%v} %v: Is trying or later request comes",
 			me, logString)
 		return ErrOldRequest
 	}
@@ -123,21 +123,12 @@ func (sm *ShardMaster) Solve(clerkId int64, index int,
 		sm.lastWaitingCV[clerkId].Signal()
 	}
 	sm.lastWaitingCV[clerkId] = nil
-	sm.lastWaitingIndex[clerkId] = index
 
-	DPrintf("{%v} %v: will Start command", me, logString)
+	_, _ = DPrintf("{%v} %v: will Start command", me, logString)
 	_, _, _ = sm.rf.Start(opCommand)
 
-	if sm.lastAppliedIndex[clerkId] >= index {
-		DPrintf("{%v} %v: Success", me, logString)
-		return OK
-	}
-	if sm.lastWaitingIndex[clerkId] > index {
-		DPrintf("{%v} %v: Later request comes", me, logString)
-		return ErrOldRequest
-	}
-
 	cv := sync.NewCond(&sm.mu)
+	sm.lastWaitingIndex[clerkId] = index
 	sm.lastWaitingCV[clerkId] = cv
 
 	go TimeOutRoutine(cv)
@@ -145,10 +136,10 @@ func (sm *ShardMaster) Solve(clerkId int64, index int,
 	cv.Wait()
 
 	if sm.lastAppliedIndex[clerkId] >= index {
-		DPrintf("{%v} %v: Success", me, logString)
+		_, _ = DPrintf("{%v} %v: Success", me, logString)
 		return OK
 	} else {
-		DPrintf("{%v} %v: Fail", me, logString)
+		_, _ = DPrintf("{%v} %v: Fail", me, logString)
 		if sm.lastWaitingIndex[clerkId] == index {
 			// Now I'm failed and I'm not waiting
 			sm.lastWaitingIndex[clerkId] -= 1
@@ -224,7 +215,7 @@ func (sm *ShardMaster) GenerateQueryResult(queryNum int, reply *QueryReply){
 		reply.Config = sm.configs[queryNum]
 	}
 	reply.WrongLeader = false
-	DPrintf("{%v} Query (%v): Succeed, config: %v", sm.me, queryNum, reply.Config)
+	_, _ = DPrintf("{%v} Query (%v): Succeed, config: %v", sm.me, queryNum, reply.Config)
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
@@ -241,15 +232,15 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	clerkId := args.ClerkId
 	index := args.Index
 	queryNum := args.Num
-	DPrintf("{%v} Query (%v): clerk:%v, index:%v",
+	_, _ = DPrintf("{%v} Query (%v): clerk:%v, index:%v",
 		me, queryNum, clerkId, index)
 
 	if !isLeader {
-		DPrintf("{%v} Query (%v): Not leader", me, queryNum)
+		_, _ = DPrintf("{%v} Query (%v): Not leader", me, queryNum)
 		reply.Err = ErrWrongLeader
 		return
 	} else {
-		DPrintf("{%v} Query (%v): Is leader", me, queryNum)
+		_, _ = DPrintf("{%v} Query (%v): Is leader", me, queryNum)
 	}
 
 	if sm.lastAppliedIndex[clerkId] >= index {
@@ -257,31 +248,22 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 		return
 	}
 	if sm.lastWaitingIndex[clerkId] >= index {
-		DPrintf("{%v} Query (%v): Is trying or later request comes", me, queryNum)
+		_, _ = DPrintf("{%v} Query (%v): Is trying or later request comes", me, queryNum)
 		reply.Err = ErrOldRequest
 		return
 	}
 	if sm.lastWaitingCV[clerkId] != nil {
 		sm.lastWaitingCV[clerkId].Signal()
+		sm.lastWaitingCV[clerkId] = nil
 	}
-	sm.lastWaitingCV[clerkId] = nil
-	sm.lastWaitingIndex[clerkId] = index
 
-	DPrintf("{%v} Query (%v): add log", me, queryNum)
+	_, _ = DPrintf("{%v} Query (%v): add log", me, queryNum)
 	opCommand := Op{ClerkId: clerkId, ClerkIndex: index,
 		QueryNumber: queryNum, OpString: OpStringQuery}
 	_, _, _ = sm.rf.Start(opCommand)
 
-	if sm.lastAppliedIndex[clerkId] >= index {
-		sm.GenerateQueryResult(queryNum, reply)
-		return
-	}
-	if sm.lastWaitingIndex[clerkId] > index {
-		DPrintf("{%v} Query (%v): later request comes", me, queryNum)
-		reply.Err = ErrOldRequest
-		return
-	}
 	cv := sync.NewCond(&sm.mu)
+	sm.lastWaitingIndex[clerkId] = index
 	sm.lastWaitingCV[args.ClerkId] = cv
 
 	go TimeOutRoutine(cv)
@@ -291,7 +273,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	if sm.lastAppliedIndex[clerkId] >= index {
 		sm.GenerateQueryResult(queryNum, reply)
 	} else {
-		DPrintf("{%v} Query (%v): Fail", me, queryNum)
+		_, _ = DPrintf("{%v} Query (%v): Fail", me, queryNum)
 		if sm.lastWaitingIndex[clerkId] == index {
 			sm.lastWaitingIndex[clerkId] -= 1 // Now I'm failed and I'm not waiting
 		}
@@ -415,7 +397,7 @@ func (sm *ShardMaster) ControlDaemon() {
 
 		// applyMsg will not contain snapshot
 
-		DPrintf("{%v} apply log [%v]: %v", sm.me, applyMsg.CommandIndex, applyMsg.Command)
+		_, _ = DPrintf("{%v} apply log [%v]: %v", sm.me, applyMsg.CommandIndex, applyMsg.Command)
 
 		if !applyMsg.IsLeader {
 			for k, v := range sm.lastWaitingCV {
@@ -436,7 +418,7 @@ func (sm *ShardMaster) ControlDaemon() {
 				for _, v := range op.LeaveGIDs{
 					sm.LeaveOne(v)
 					delete(sm.configs[sm.configsCount - 1].Groups, v)
-					DPrintf("{%v} leave %v, config: %v, order: %v",
+					_, _ = DPrintf("{%v} leave %v, config: %v, order: %v",
 						sm.me, v, sm.configs[sm.configsCount - 1], sm.order)
 				}
 			case OpStringJoin:
@@ -444,7 +426,7 @@ func (sm *ShardMaster) ControlDaemon() {
 				for k, v := range op.JoinServers{
 					sm.JoinOne(k)
 					sm.configs[sm.configsCount - 1].Groups[k] = v
-					DPrintf("{%v} join %v, config: %v, order: %v",
+					_, _ = DPrintf("{%v} join %v, config: %v, order: %v",
 						sm.me, k, sm.configs[sm.configsCount - 1], sm.order)
 				}
 			case OpStringMove:
