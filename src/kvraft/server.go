@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const Debug = 1
+const Debug = 0
 const TimeGap = 100 * time.Millisecond
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -122,17 +122,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	DPrintf("{%v} Get (%v): add log", me, key)
 	opCommand := Op{ClerkId: clerkId, ClerkIndex: index,
 		Key: key, Value: "", OpString: OpStringGet}
-	_, _, _ = kv.rf.Start(opCommand)
+	_, _, isLeader = kv.rf.Start(opCommand)
 
-	if kv.lastAppliedIndex[clerkId] >= index {
-		kv.GenerateGetResult(key, reply)
+	if !isLeader{
+		DPrintf("{%v} Get (%v): Not leader", me, key)
+		reply.Err = ErrWrongLeader
 		return
 	}
-	if kv.lastWaitingIndex[clerkId] > index {
-		DPrintf("{%v} Get (%v): later request comes", me, key)
-		reply.Err = ErrOldRequest
-		return
-	}
+
 	cv := sync.NewCond(&kv.mu)
 	kv.lastWaitingCV[clerkId] = cv
 
@@ -202,18 +199,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		me, key, value)
 	opCommand := Op{ClerkId: clerkId, ClerkIndex: index,
 		Key: key, Value: value, OpString: args.Op}
-	_, _, _ = kv.rf.Start(opCommand)
+	_, _, isLeader = kv.rf.Start(opCommand)
 
-	if kv.lastAppliedIndex[clerkId] >= index {
-		DPrintf("{%v} PutAppend (%v:%v): Success",
+	if !isLeader{
+		DPrintf("{%v} PutAppend (%v:%v): Not leader",
 			me, key, value)
-		reply.Err = OK
-		return
-	}
-	if kv.lastWaitingIndex[clerkId] > index {
-		DPrintf("{%v} PutAppend (%v:%v): Later request comes",
-			me, key, value)
-		reply.Err = ErrOldRequest
+		reply.Err = ErrWrongLeader
 		return
 	}
 
@@ -380,20 +371,20 @@ func (kv *KVServer) EncodeSnapShot() []byte {
 }
 
 func (kv *KVServer) readSnapshot(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if data == nil || len(data) < 1 {
 		return
 	}
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 
 	var kvMap map[string]string
-	var lastAppliedINdex map[int64]int
+	var lastAppliedIndex map[int64]int
 
 	if d.Decode(&kvMap) != nil ||
-		d.Decode(&lastAppliedINdex) != nil {
+		d.Decode(&lastAppliedIndex) != nil {
 		log.Fatal("Error while decode")
 	} else {
 		kv.kvMap = kvMap
-		kv.lastAppliedIndex = lastAppliedINdex
+		kv.lastAppliedIndex = lastAppliedIndex
 	}
 }

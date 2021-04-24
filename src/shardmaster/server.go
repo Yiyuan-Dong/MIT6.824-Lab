@@ -356,12 +356,7 @@ func (sm *ShardMaster) JoinOne(joinGID int){ // Modify Shards
 	}
 
 	for k, v := range allocate{
-		sizeDeserve := 0
-		if sm.order[k] >= 10{
-			sizeDeserve = 0
-		} else {
-			sizeDeserve = size[MIN(len(sm.order) - 1, 9)][sm.order[k]]
-		}
+		sizeDeserve := size[MIN(len(sm.order) - 1, 9)][sm.order[k]]
 		reallocateCount := len(v) - sizeDeserve
 		for _, shard := range v[:reallocateCount]{
 			lastConfig.Shards[shard] = joinGID
@@ -398,12 +393,7 @@ func (sm *ShardMaster) LeaveOne(leaveGID int){ // Modify Shards
 			continue
 		}
 
-		sizeDeserve := 0
-		if sm.order[k] >= 10{
-			sizeDeserve = 0
-		} else {
-			sizeDeserve = size[MIN(len(sm.order) - 1, 9)][sm.order[k]]
-		}
+		sizeDeserve := size[MIN(len(sm.order) - 1, 9)][sm.order[k]]
 		reallocateCount := sizeDeserve - len(v)
 		for i := 0; i < reallocateCount; i++{
 			lastConfig.Shards[allocate[leaveGID][0]] = k

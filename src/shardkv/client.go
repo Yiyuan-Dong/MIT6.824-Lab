@@ -84,7 +84,7 @@ func (ck *Clerk) Get(key string) string {
 				if ok && (reply.Err == ErrWrongGroup) {
 					break
 				}
-				// ... not ok, or ErrWrongLeader
+				// ... not ok, or ErrWrongLeader. Try other servers in the group
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
