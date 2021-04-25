@@ -66,16 +66,16 @@ type ShardKV struct {
 	persister        *raft.Persister
 
 	// variable new added
-	control          [shardmaster.NShards]bool
-	shardTS          [shardmaster.NShards]int
+	control          [shardmaster.NShards]bool  // persist
+	shardTS          [shardmaster.NShards]int   // persist
 	lastWaitingShard map[int64]int
-	currentConfig    shardmaster.Config
+	currentConfig    shardmaster.Config         // persist
 	masterClerk      *shardmaster.Clerk
 	shardCV          *sync.Cond
 	waitingConfigIdx int
 	duplicateCount   int
-	firstGID         int
-	initialed        bool
+	firstGID         int                        // persist
+	initialed        bool                       // persist
 }
 
 func (kv *ShardKV) GenerateGetResult(key string, reply *GetReply) {
@@ -94,7 +94,12 @@ func (kv *ShardKV) EncodeSnapShot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if e.Encode(kv.kvMap) != nil ||
-		e.Encode(kv.lastAppliedIndex) != nil {
+		e.Encode(kv.lastAppliedIndex) != nil ||
+		e.Encode(kv.control) != nil ||
+		e.Encode(kv.shardTS) != nil ||
+		e.Encode(kv.currentConfig) != nil ||
+		e.Encode(kv.firstGID) != nil ||
+		e.Encode(kv.initialed) != nil{
 		log.Fatal("Error while encoding")
 	}
 	data := w.Bytes()
@@ -110,13 +115,28 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 
 	var kvMap map[string]string
 	var lastAppliedIndex map[int64]int
+	var control [shardmaster.NShards]bool
+	var shardTS [shardmaster.NShards]int
+	var currentConfig shardmaster.Config
+	var firstGID int
+	var initialed bool
 
 	if d.Decode(&kvMap) != nil ||
-		d.Decode(&lastAppliedIndex) != nil {
+		d.Decode(&lastAppliedIndex) != nil ||
+		d.Decode(&control) != nil ||
+		d.Decode(&shardTS) != nil ||
+		d.Decode(&currentConfig) != nil ||
+		d.Decode(&firstGID) != nil ||
+		d.Decode(&initialed) != nil {
 		log.Fatal("Error while decode")
 	} else {
 		kv.kvMap = kvMap
 		kv.lastAppliedIndex = lastAppliedIndex
+		kv.control = control
+		kv.shardTS = shardTS
+		kv.currentConfig = currentConfig
+		kv.firstGID = firstGID
+		kv.initialed = initialed
 	}
 }
 
@@ -704,7 +724,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.lastWaitingCV = map[int64]*sync.Cond{}
 	kv.persister = persister
 
-	kv.lastWaitingShard = map[int64]int{}
 	kv.currentConfig = shardmaster.Config{
 		Num:    0,
 		Shards: [10]int{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -716,7 +735,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.firstGID = -1
 	kv.initialed = false
 
-	DPrintf("{%v:%v} start!", kv.me, kv.gid)
+	if kv.persister.SnapshotSize() > 0{
+		kv.readSnapshot(kv.persister.ReadSnapshot())
+		DPrintf("{%v:%v} read snapshot, kvMap: %v, control: %v, currentConfig: %v",
+			kv.me, kv.gid, kv.kvMap, kv.control, kv.currentConfig)
+	} else {
+		DPrintf("{%v:%v} start!", kv.me, kv.gid)
+	}
 
 	go func() {
 		newTimer := time.NewTimer(MasterQueryGap)
