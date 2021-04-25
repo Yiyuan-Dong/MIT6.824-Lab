@@ -89,4 +89,5 @@ type QueryReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
+	FirstReply  int
 }

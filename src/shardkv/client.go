@@ -8,12 +8,16 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "../labrpc"
+import (
+	"../labrpc"
+	"log"
+)
 import "crypto/rand"
 import "math/big"
 import "../shardmaster"
 import "time"
 
+const ConstWaitingGap = 300 * time.Millisecond
 //
 // which shard is a key in?
 // please use this function,
@@ -40,6 +44,8 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	clerkId  int64
+	index    int
 }
 
 //
@@ -56,6 +62,9 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+
+	ck.clerkId = nrand()
+	ck.index = 1
 	return ck
 }
 
@@ -68,13 +77,21 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.Index = ck.index
+	ck.index++
+	args.ClerkId = ck.clerkId
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
-			for si := 0; si < len(servers); si++ {
+			si := 0
+			for {
+				if si == len(servers){
+					break
+				}
+
 				srv := ck.make_end(servers[si])
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
@@ -84,7 +101,16 @@ func (ck *Clerk) Get(key string) string {
 				if ok && (reply.Err == ErrWrongGroup) {
 					break
 				}
+				if ok && (reply.Err == ErrWaitShards) {
+					time.Sleep(ConstWaitingGap)
+					continue
+				}
+				if ok && (reply.Err == ErrOldRequest) {
+					log.Fatal("WTF?")
+				}
+
 				// ... not ok, or ErrWrongLeader. Try other servers in the group
+				si++
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -104,13 +130,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.Index = ck.index
+	ck.index++
+	args.ClerkId = ck.clerkId
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
-			for si := 0; si < len(servers); si++ {
+			si := 0
+			for {
+				if si >= len(servers){
+					break
+				}
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
@@ -120,7 +152,16 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				if ok && reply.Err == ErrWrongGroup {
 					break
 				}
+				if ok && (reply.Err == ErrWaitShards) {
+					time.Sleep(ConstWaitingGap)
+					continue
+				}
+				if ok && (reply.Err == ErrOldRequest) {
+					log.Fatal("WTF?")
+				}
+
 				// ... not ok, or ErrWrongLeader
+				si++
 			}
 		}
 		time.Sleep(100 * time.Millisecond)

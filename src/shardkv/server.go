@@ -12,8 +12,9 @@ import "sync"
 import "../labgob"
 import "../shardmaster"
 
-const Debug = 0
+const Debug = 2
 const MasterQueryGap = 100 * time.Millisecond
+const SendShardsGap = 500 * time.Millisecond
 const DuplicateConfigCount = 10
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -24,8 +25,8 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 func CriticalDPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 1 {
-		log.Printf(format, a...)
+	if Debug >= 1 {
+		log.Printf("**" + format, a...)
 	}
 	return
 }
@@ -42,6 +43,9 @@ type Op struct {
 	Value      string
 	OpString   string
 	Config     shardmaster.Config
+	ShardNum   int
+	ShardTS    int
+	KvMap      map[string]string
 }
 
 type ShardKV struct {
@@ -67,9 +71,10 @@ type ShardKV struct {
 	lastWaitingShard map[int64]int
 	currentConfig    shardmaster.Config
 	masterClerk      *shardmaster.Clerk
-	configCV         *sync.Cond
+	shardCV          *sync.Cond
 	waitingConfigIdx int
 	duplicateCount   int
+	firstReply       int
 }
 
 func (kv *ShardKV) GenerateGetResult(key string, reply *GetReply) {
@@ -203,12 +208,12 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		if kv.lastWaitingIndex[clerkId] == index {
 			kv.lastWaitingIndex[clerkId] -= 1 // Now I'm failed and I'm not waiting
 		}
-		if kv.currentConfig.Shards[shardNum] != kv.me{
+		if kv.currentConfig.Shards[shardNum] != kv.gid{
 			reply.Err = ErrWrongGroup
 			_, _ = DPrintf("{%v} Get (%v)->(%v): wrong group", me, key, shardNum)
 			return
 		}
-		if kv.currentConfig.Shards[shardNum] == kv.me &&
+		if kv.currentConfig.Shards[shardNum] == kv.gid &&
 			kv.control[shardNum] != true{
 			reply.Err = ErrWaitShards
 			_, _ = DPrintf("{%v} Get (%v)->(%v): waits shards", me, key, shardNum)
@@ -251,7 +256,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			me, key, value)
 	}
 
-	if kv.currentConfig.Shards[shardNum] != kv.me {
+	if kv.currentConfig.Shards[shardNum] != kv.gid {
 		_, _ = DPrintf("{%v} PutAppend (%v:%v)->(%v): Wrong group",
 			me, key, value, shardNum)
 		reply.Err = ErrWrongGroup
@@ -309,13 +314,13 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		if kv.lastWaitingIndex[clerkId] == index {
 			kv.lastWaitingIndex[clerkId] -= 1 // Now I'm failed and I'm not waiting
 		}
-		if kv.currentConfig.Shards[shardNum] != kv.me{
+		if kv.currentConfig.Shards[shardNum] != kv.gid{
 			reply.Err = ErrWrongGroup
 			_, _ = DPrintf("{%v} PutAppend (%v:%v)->(%v): wrong group",
 				me, key, value, shardNum)
 			return
 		}
-		if kv.currentConfig.Shards[shardNum] == kv.me &&
+		if kv.currentConfig.Shards[shardNum] == kv.gid &&
 			kv.control[shardNum] != true{
 			reply.Err = ErrWaitShards
 			_, _ = DPrintf("{%v} PutAppend (%v:%v)->(%v): waits shards",
@@ -341,12 +346,74 @@ func (kv *ShardKV) Kill() {
 	// Your code here, if desired.
 }
 
-func (kv *ShardKV) SendOutShards() {
-
-	go kv.SendShardRPC()
+func (kv *ShardKV) logConfig(configToLog shardmaster.Config){
+	configOp := Op{
+		ClerkId:    0,
+		ClerkIndex: configToLog.Num,
+		OpString:   OpStringConfig,
+		Config:     configToLog}
+	kv.rf.Start(configOp)
 }
 
-func (kv *ShardKV) SendShardRPC() {
+func (kv *ShardKV) SendOutShards() {
+	// Should acquire lock outside the function
+	for shardNum, gid := range kv.currentConfig.Shards{
+		if kv.control[shardNum] && gid != kv.gid{
+			kv.control[shardNum] = false
+			go kv.SendShardRPC(shardNum, gid)
+		}
+	}
+}
+
+func (kv *ShardKV) SendShardRPC(shardNum int, gid int) {
+	 kv.mu.Lock()
+
+	 me := kv.me
+	 myGid := kv.gid
+
+	 args := SendShardArgs{
+	 	ShardNum: shardNum,
+	 	ShardTS:  kv.shardTS[shardNum] + 1, // +1 ! important!
+	 	KvMap:    map[string]string{},
+	 	Config:   kv.currentConfig,
+	 }
+	 for k, v := range kv.kvMap{
+	 	if key2shard(k) == shardNum{
+	 		args.KvMap[k] = v
+		}
+	 }
+
+	 var servers []*labrpc.ClientEnd
+	 for _, name := range kv.currentConfig.Groups[gid]{
+	 	servers = append(servers, kv.make_end(name))
+	 }
+
+	 kv.mu.Unlock()
+
+	 si := 0
+	 for {
+	 	if si == len(servers){
+	 		si = 0
+		}
+		server := servers[si]
+
+		var reply SendShardReply
+		 CriticalDPrintf("{%v:%v} will send [%v](TS:%v) to {%v}",
+			 me, myGid, shardNum, args.ShardTS, gid)
+		ok := server.Call("ShardKV.SendShard", &args, &reply)
+
+		if !ok{
+			continue
+		}
+		if reply.err == OK{
+			CriticalDPrintf("{%v:%v} successfully send [%v](TS:%v) to {%v}",
+				me, myGid, shardNum, args.ShardTS, gid)
+			return
+		}
+		// reply.Err == ErrWrongLeader
+		si++
+		continue
+	 }
 
 }
 
@@ -354,7 +421,50 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	kv.configCV.Wait()
+	_, isLeader := kv.rf.GetState()
+	if !isLeader{
+		reply.err = ErrWrongLeader
+		return
+	}
+	reply.err = OK
+
+	if args.Config.Num > kv.currentConfig.Num{
+		CriticalDPrintf("{%v:%v} log config: %v",
+			kv.me, kv.gid, args.Config)
+		kv.logConfig(args.Config)
+	}
+
+	shardNum := args.ShardNum
+	if kv.shardTS[shardNum] >= args.ShardTS{
+		return
+	}
+
+	CriticalDPrintf("{%v:%v} will log shard[%v](TS:%v)",
+		kv.me, kv.gid, args.ShardNum, args.ShardTS)
+	opCommand := Op{
+		ShardNum: shardNum,
+		KvMap:    map[string]string{},
+		ShardTS:  args.ShardTS,
+		OpString: OpStringKvMap,
+	}
+
+	for key, value := range args.KvMap {
+		opCommand.KvMap[key] = value
+	}
+
+	_, _, isLeader = kv.rf.Start(opCommand)
+	if !isLeader{
+		reply.err = ErrWrongLeader
+		return
+	}
+
+	// Wait until the KV data is applied
+	for {
+		kv.shardCV.Wait()
+		if kv.control[shardNum]{
+			return
+		}
+	}
 
 }
 
@@ -413,25 +523,63 @@ func (kv *ShardKV) ControlDaemon() {
 
 		op := applyMsg.Command.(Op)
 
-		if op.OpString == OpStringConfig {
-			if op.Config.Num <= kv.currentConfig.Num {
+		// TODO if KV, delete old and apply new
+		if op.OpString == OpStringKvMap {
+			if op.ShardTS <= kv.shardTS[op.ShardNum]{
 				continue
 			}
 
+			CriticalDPrintf("{%v:%v} applied [%v](TS: %v)",
+				kv.me, kv.gid, op.ShardNum, op.ShardTS)
+
+			kv.control[op.ShardNum] = true
+			kv.shardTS[op.ShardNum] = op.ShardTS
+			for k, _ := range kv.kvMap{
+				if key2shard(k) == op.ShardNum{
+					delete(kv.kvMap, k)
+				}
+			}
+			for k, v := range op.KvMap {
+				kv.kvMap[k] = v
+			}
+
+			kv.shardCV.Signal()
+			if applyMsg.IsLeader{
+				kv.SendOutShards()
+			}
+
+			kv.TrySnapshot(applyMsg.CommandIndex)
+			continue
+		}
+
+		if op.OpString == OpStringConfig {
+
+			if op.Config.Num <= kv.currentConfig.Num {  // old or has applied
+				continue
+			}
+
+			CriticalDPrintf("{%v:%v} apply config %v",
+				kv.me, kv.gid, op.Config)
 			kv.currentConfig = op.Config
 
-			if kv.currentConfig.Num == 1 {
+			if kv.currentConfig.Num > 0 &&
+				kv.firstReply == kv.currentConfig.Num {
 				for i, v := range kv.currentConfig.Shards {
-					if v == kv.me {
+					if v == kv.gid {
 						kv.control[i] = true
 						kv.shardTS[i] = 1
 					}
 				}
+				CriticalDPrintf("{%v:%v} firstReply: %v, control: %v, shardTs: %v",
+					kv.me, kv.gid, kv.firstReply, kv.control, kv.shardTS)
 			}
-			// TODO sendoutshards
+
+			if applyMsg.IsLeader{
+				kv.SendOutShards()
+			}
 
 			for k, v := range kv.lastWaitingShard{
-				if kv.currentConfig.Shards[v] != kv.me &&
+				if kv.currentConfig.Shards[v] != kv.gid &&
 					kv.lastWaitingCV[k] != nil {
 					kv.lastWaitingCV[k].Signal()
 					kv.lastWaitingCV[k] = nil
@@ -445,7 +593,7 @@ func (kv *ShardKV) ControlDaemon() {
 		kv.SignalIfNewest(op.ClerkId, op.ClerkIndex)
 		shardNum := key2shard(op.Key)
 
-		if kv.currentConfig.Shards[shardNum] == kv.me &&
+		if kv.currentConfig.Shards[shardNum] == kv.gid &&
 			kv.control[shardNum]{
 			if kv.lastAppliedIndex[op.ClerkId] < op.ClerkIndex {
 				// if is not duplicated log, apply it
@@ -494,28 +642,24 @@ func (kv *ShardKV) ControlDaemon() {
 //
 
 func (kv *ShardKV) QueryMaster() {
-	config := kv.masterClerk.Query(-1)
+	configRet := kv.masterClerk.Query(-1)
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
+	kv.firstReply = kv.masterClerk.GetFirstReply()
 	_, isLeader := kv.rf.GetState()
-	if isLeader && config.Num > kv.waitingConfigIdx {
+	if isLeader && configRet.Num > kv.waitingConfigIdx {
 		kv.duplicateCount = 0
-		kv.waitingConfigIdx = config.Num
-		configOp := Op{
-			ClerkId:    0,
-			ClerkIndex: config.Num,
-			OpString:   OpStringConfig,
-			Config:     config}
-		kv.rf.Start(configOp)
-
+		kv.waitingConfigIdx = configRet.Num
+		kv.logConfig(configRet)
+		CriticalDPrintf("{%v:%v} get config %v", kv.me, kv.gid, configRet)
 		return
 	}
 
 	// 下面这段代码的意义等同于TimeOutRoutine,即写下Log之后失去了
 	// Leader之位,未确认的Config被覆盖,结果不会重新给机会了
-	if isLeader && config.Num == kv.waitingConfigIdx {
+	if isLeader && configRet.Num == kv.waitingConfigIdx {
 		kv.duplicateCount++
 		if kv.duplicateCount == DuplicateConfigCount {
 			kv.duplicateCount = 0
@@ -537,21 +681,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.make_end = make_end
 	kv.gid = gid
 	kv.masters = masters
-	kv.masterClerk = shardmaster.MakeClerk(masters)
-	kv.configCV = sync.NewCond(&kv.mu)
-	kv.duplicateCount = 0
-	kv.lastWaitingShard = map[int64]int{}
-
-	DPrintf("{%v} will begin!", kv.me)
-
-	go func() {
-		newTimer := time.NewTimer(MasterQueryGap)
-		for {
-			newTimer.Reset(MasterQueryGap)
-			<-newTimer.C
-			kv.QueryMaster()
-		}
-	}()
 
 	// Your initialization code here.
 
@@ -560,6 +689,50 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
+	kv.duplicateCount = 0
+	kv.lastWaitingShard = map[int64]int{}
+	kv.kvMap = map[string]string{}
+	kv.lastAppliedIndex = map[int64]int{}
+	kv.lastWaitingIndex = map[int64]int{}
+	kv.lastWaitingCV = map[int64]*sync.Cond{}
+	kv.persister = persister
+
+	kv.lastWaitingShard = map[int64]int{}
+	kv.currentConfig = shardmaster.Config{
+		Num: 0,
+		Shards: [10]int{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+	}
+	kv.masterClerk = shardmaster.MakeClerk(masters)
+	kv.shardCV = sync.NewCond(&kv.mu)
+	kv.waitingConfigIdx = 0
+	kv.duplicateCount = 0
+	kv.firstReply = 0
+
+	DPrintf("{%v} start!", kv.me)
+
+	go func() {
+		newTimer := time.NewTimer(MasterQueryGap)
+		for {
+			kv.QueryMaster()
+			newTimer.Reset(MasterQueryGap)
+			<-newTimer.C
+		}
+	}()
+
+	go func() {
+		newTimer := time.NewTimer(SendShardsGap)
+		for {
+			newTimer.Reset(SendShardsGap)
+			<-newTimer.C
+			_, isLeader := kv.rf.GetState()
+			if isLeader{
+				kv.SendOutShards()
+			}
+		}
+	}()
+
+	go kv.ControlDaemon()
 
 	return kv
 }

@@ -9,6 +9,8 @@ package shardkv
 // You will have to modify these definitions.
 //
 
+import "../shardmaster"
+
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
@@ -20,6 +22,7 @@ const (
 	OpStringPut    = "Put"
 	OpStringAppend = "Append"
 	OpStringGet    = "Get"
+	OpStringKvMap  = "KVMap"
 )
 
 type Err string
@@ -54,9 +57,12 @@ type GetReply struct {
 }
 
 type SendShardArgs struct{
-
+	ShardNum int
+	ShardTS  int
+	KvMap    map[string]string
+	Config   shardmaster.Config
 }
 
 type SendShardReply struct{
-
+	err  	  Err
 }

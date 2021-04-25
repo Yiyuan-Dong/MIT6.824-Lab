@@ -48,6 +48,7 @@ type ShardMaster struct {
 	lastWaitingIndex map[int64]int
 	lastWaitingCV    map[int64]*sync.Cond
 	persister        *raft.Persister
+	firstReply       int
 }
 
 
@@ -214,6 +215,10 @@ func (sm *ShardMaster) GenerateQueryResult(queryNum int, reply *QueryReply){
 	} else {
 		reply.Config = sm.configs[queryNum]
 	}
+	if sm.firstReply == 0 && reply.Config.Num > 0{
+		sm.firstReply = reply.Config.Num
+	}
+	reply.FirstReply = sm.firstReply
 	reply.WrongLeader = false
 	_, _ = DPrintf("{%v} Query (%v): Succeed, config: %v", sm.me, queryNum, reply.Config)
 }
@@ -468,6 +473,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.lastWaitingIndex = map[int64]int{}
 	sm.lastWaitingCV = map[int64]*sync.Cond{}
 	sm.persister = persister
+	sm.firstReply = 0
 
 	// Your code here.
 	go sm.ControlDaemon()
