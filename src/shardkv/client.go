@@ -11,6 +11,7 @@ package shardkv
 import (
 	"../labrpc"
 	"log"
+	"sync"
 )
 import "crypto/rand"
 import "math/big"
@@ -46,6 +47,7 @@ type Clerk struct {
 	// You will have to modify this struct.
 	clerkId  int64
 	index    int
+	mu       sync.Mutex
 }
 
 //
@@ -77,9 +79,12 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+
+	ck.mu.Lock()
 	args.Index = ck.index
 	ck.index++
 	args.ClerkId = ck.clerkId
+	ck.mu.Unlock()
 
 	for {
 		shard := key2shard(key)
@@ -130,9 +135,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
+
+	ck.mu.Lock()
 	args.Index = ck.index
 	ck.index++
 	args.ClerkId = ck.clerkId
+	ck.mu.Unlock()
 
 	for {
 		shard := key2shard(key)

@@ -64,5 +64,5 @@ type SendShardArgs struct{
 }
 
 type SendShardReply struct{
-	err  	  Err
+	Err Err
 }

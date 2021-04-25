@@ -42,15 +42,20 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) GetFirstReply() int{
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
 	return ck.firstReply
 }
 
 func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{}
 	// Your code here.
+	ck.mu.Lock()
 	args.Index = ck.index
 	ck.index++
 	args.ClerkId = ck.clerkId
+	ck.mu.Unlock()
 
 	args.Num = num
 	for {
@@ -59,7 +64,9 @@ func (ck *Clerk) Query(num int) Config {
 			var reply QueryReply
 			ok := srv.Call("ShardMaster.Query", args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.mu.Lock()
 				ck.firstReply = reply.FirstReply
+				ck.mu.Unlock()
 				return reply.Config
 			}
 		}
@@ -70,9 +77,11 @@ func (ck *Clerk) Query(num int) Config {
 func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
 	// Your code here.
+	ck.mu.Lock()
 	args.Index = ck.index
 	ck.index++
 	args.ClerkId = ck.clerkId
+	ck.mu.Unlock()
 
 	args.Servers = servers
 
@@ -92,9 +101,11 @@ func (ck *Clerk) Join(servers map[int][]string) {
 func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
 	// Your code here.
+	ck.mu.Lock()
 	args.Index = ck.index
 	ck.index++
 	args.ClerkId = ck.clerkId
+	ck.mu.Unlock()
 
 	args.GIDs = gids
 
@@ -114,9 +125,11 @@ func (ck *Clerk) Leave(gids []int) {
 func (ck *Clerk) Move(shard int, gid int) {
 	args := &MoveArgs{}
 	// Your code here.
+	ck.mu.Lock()
 	args.Index = ck.index
 	ck.index++
 	args.ClerkId = ck.clerkId
+	ck.mu.Unlock()
 
 	args.Shard = shard
 	args.GID = gid
