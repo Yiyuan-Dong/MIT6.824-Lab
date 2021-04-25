@@ -15,9 +15,9 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
-	clerkId 	int64  // use a int64 random number to identify a clerk
-	index   	int
-	firstReply  int
+	clerkId     int64  // use a int64 random number to identify a clerk
+	index       int
+	firstGID    int
 
 	mu          sync.Mutex
 }
@@ -36,16 +36,16 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 
 	ck.clerkId = nrand()
 	ck.index = 1
-	ck.firstReply = 0
+	ck.firstGID = -1
 
 	return ck
 }
 
-func (ck *Clerk) GetFirstReply() int{
+func (ck *Clerk) GetFirstGID() int{
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 
-	return ck.firstReply
+	return ck.firstGID
 }
 
 func (ck *Clerk) Query(num int) Config {
@@ -65,7 +65,7 @@ func (ck *Clerk) Query(num int) Config {
 			ok := srv.Call("ShardMaster.Query", args, &reply)
 			if ok && reply.WrongLeader == false {
 				ck.mu.Lock()
-				ck.firstReply = reply.FirstReply
+				ck.firstGID = reply.FirstGID
 				ck.mu.Unlock()
 				return reply.Config
 			}

@@ -12,7 +12,7 @@ import "sync"
 import "../labgob"
 import "../shardmaster"
 
-const Debug = 1
+const Debug = 0
 const MasterQueryGap = 100 * time.Millisecond
 const SendShardsGap = 500 * time.Millisecond
 const DuplicateConfigCount = 10
@@ -74,7 +74,8 @@ type ShardKV struct {
 	shardCV          *sync.Cond
 	waitingConfigIdx int
 	duplicateCount   int
-	firstReply       int
+	firstGID         int
+	initialed        bool
 }
 
 func (kv *ShardKV) GenerateGetResult(key string, reply *GetReply) {
@@ -565,16 +566,15 @@ func (kv *ShardKV) ControlDaemon() {
 				kv.me, kv.gid, op.Config)
 			kv.currentConfig = op.Config
 
-			if kv.currentConfig.Num > 0 &&
-				kv.firstReply == kv.currentConfig.Num {
-				for i, v := range kv.currentConfig.Shards {
-					if v == kv.gid {
-						kv.control[i] = true
-						kv.shardTS[i] = 1
-					}
+			if kv.firstGID == kv.gid && !kv.initialed{
+				kv.initialed = true
+				// If some shard does not belong to me, I will send them out soon
+				for i, _ := range kv.control{
+					kv.control[i] = true
+					kv.shardTS[i] = 1
 				}
-				CriticalDPrintf("{%v:%v} firstReply: %v, control: %v, shardTs: %v",
-					kv.me, kv.gid, kv.firstReply, kv.control, kv.shardTS)
+				CriticalDPrintf("{%v:%v} firstGID: %v, control: %v, shardTs: %v",
+					kv.me, kv.gid, kv.firstGID, kv.control, kv.shardTS)
 			}
 
 			if applyMsg.IsLeader {
@@ -650,7 +650,9 @@ func (kv *ShardKV) QueryMaster() {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	kv.firstReply = kv.masterClerk.GetFirstReply()
+	if kv.firstGID < 0{
+		kv.firstGID = kv.masterClerk.GetFirstGID()
+	}
 	_, isLeader := kv.rf.GetState()
 	if isLeader && configRet.Num > kv.waitingConfigIdx {
 		kv.duplicateCount = 0
@@ -711,7 +713,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.shardCV = sync.NewCond(&kv.mu)
 	kv.waitingConfigIdx = 0
 	kv.duplicateCount = 0
-	kv.firstReply = 0
+	kv.firstGID = -1
+	kv.initialed = false
 
 	DPrintf("{%v:%v} start!", kv.me, kv.gid)
 
