@@ -1,3 +1,20 @@
+/**
+Dyy来介绍一些核心的设计想法:
+1.lastApplied:
+	如果阅读代码会发现无论是Get()还是PutAppend()都有一个问题:
+	比如当前某clerk最新的idx是7，而你的RPC的idx是6，那么你在
+	wait()被唤醒时检查lastAppliedIndex==7会认为7>6，所以你认
+	为请求被满足了。但是很有可能满足的是7，而6因为WrongGroup之
+	类的原因没有被执行。
+	但这没有关系，因为clerk一次只执行一个请求，所以如果有idx更高
+	的请求，那么之前的请求返回什么都没关心，因为clerk不再等他了
+
+2.control
+	control代表了“控制权”的思想，他有两个特点:
+	i.  任意时刻只有零个或一个group有某一shard的控制权
+	ii. 只有log的apply可以改变控制权
+ */
+
 package shardkv
 
 // import "../shardmaster"
@@ -13,7 +30,7 @@ import "sync"
 import "../labgob"
 import "../shardmaster"
 
-const Debug = 1
+const Debug = 2
 const MasterQueryGap = 100 * time.Millisecond
 const SendShardsGap = 500 * time.Millisecond
 const DuplicateConfigCount = 10
@@ -95,7 +112,7 @@ func (kv *ShardKV) GenerateGetResult(key string, reply *GetReply, clerkId int64)
 	// Should lock and unlock outside
 	_, _ = DPrintf("{%v:%v} Get (%v): Success", kv.me, kv.gid, key)
 	value := kv.lastGetAns[clerkId]
-	if value == ErrNoKey{
+	if value == ErrNoKey {
 		reply.Err = ErrNoKey
 	} else {
 		reply.Err = OK
@@ -153,13 +170,15 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	}
 }
 
+/**
+ 这里有点复杂要用中文...
+ 本来的设计是如果applyCh说我已经不是leader了,那么Signal()所有的
+ CV.但是有一种情况是:我写了几个log,新leader来了覆盖了这些log,但是
+ 还没有来得及apply我又当回了leader.这时候CV没有被提醒,[]waitingIndex
+ 没有被改变使得这个log明明没有在广播却也不能重新让leader广播.这时候就
+ 需要超时Signal()机制
+*/
 func TimeOutRoutine(cv *sync.Cond) {
-	// 这里有点复杂要用中文...
-	// 本来的设计是如果applyCh说我已经不是leader了,那么Signal()所有的
-	// CV.但是有一种情况是:我写了几个log,新leader来了覆盖了这些log,但是
-	// 还没有来得及apply我又当回了leader.这时候CV没有被提醒,[]waitingIndex
-	// 没有被改变使得这个log明明没有在广播却也不能重新让leader广播.这时候就
-	// 需要超时Signal()机制
 	timer := time.NewTimer(2 * time.Second)
 	<-timer.C
 	cv.Signal()
@@ -411,8 +430,8 @@ func (kv *ShardKV) SendOutShards() {
 
 			// Challenge 1: Delete
 			kvMap := map[string]string{}
-			for k, v := range kv.kvMap{
-				if key2shard(k) == shardNum{
+			for k, v := range kv.kvMap {
+				if key2shard(k) == shardNum {
 					kvMap[k] = v
 					delete(kv.kvMap, k)
 					CriticalDPrintf("{%v:%v} key: %v, shardNum:%v, KvMap: %v",
@@ -650,7 +669,7 @@ func (kv *ShardKV) ControlDaemon() {
 				kv.me, kv.gid, op.Config, kv.firstGID)
 			kv.currentConfig = op.Config
 
-			if kv.firstGID < 0{
+			if kv.firstGID < 0 {
 				kv.firstGID = op.firstGID
 			}
 
@@ -694,7 +713,7 @@ func (kv *ShardKV) ControlDaemon() {
 					kv.kvMap[op.Key] = op.Value
 				case OpStringGet:
 					value, ok := kv.kvMap[op.Key]
-					if !ok{
+					if !ok {
 						kv.lastGetAns[op.ClerkId] = ErrNoKey
 					} else {
 						kv.lastGetAns[op.ClerkId] = value
