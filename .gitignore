@@ -2,4 +2,5 @@ pkg/
 api.key
 *-handin.tar.gz
 T*.txt
+X*.txt
 .idea/

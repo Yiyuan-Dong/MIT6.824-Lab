@@ -30,7 +30,7 @@ import "sync"
 import "../labgob"
 import "../shardmaster"
 
-const Debug = 2
+const Debug = 1
 const MasterQueryGap = 100 * time.Millisecond
 const SendShardsGap = 500 * time.Millisecond
 const DuplicateConfigCount = 10
@@ -439,39 +439,45 @@ func (kv *ShardKV) SendOutShards() {
 				}
 			}
 
-			go kv.SendShardRPC(shardNum, gid, kvMap)
+			var servers []*labrpc.ClientEnd
+			for _, name := range kv.currentConfig.Groups[gid]{
+				servers = append(servers, kv.make_end(name))
+			}
+			lastAppliedIndex := map[int64]int{}
+			for k, v := range kv.lastAppliedIndex {
+				lastAppliedIndex[k] = v
+			}
+
+			args := SendShardArgs{
+				ShardNum:         shardNum,
+				ShardTS:          kv.shardTS[shardNum] + 1, // +1 ! important!
+				KvMap:            kvMap,
+				Config:           kv.currentConfig,
+				LastAppliedIndex: lastAppliedIndex,
+				FirstGID:         kv.firstGID,
+			}
+
+			go kv.SendShardRPC(gid, args, servers)
 		}
 	}
 }
 
-func (kv *ShardKV) SendShardRPC(shardNum int, gid int, kvMap map[string]string) {
+func (kv *ShardKV) SendShardRPC(gid int, args SendShardArgs, servers []*labrpc.ClientEnd) {
 	kv.mu.Lock()
 
 	me := kv.me
 	myGid := kv.gid
 
-	args := SendShardArgs{
-		ShardNum:         shardNum,
-		ShardTS:          kv.shardTS[shardNum] + 1, // +1 ! important!
-		KvMap:            kvMap,
-		Config:           kv.currentConfig,
-		LastAppliedIndex: map[int64]int{},
-		FirstGID:         kv.firstGID,
-	}
-	for k, v := range kv.lastAppliedIndex {
-		args.LastAppliedIndex[k] = v
-	}
-
 	kv.mu.Unlock()
 
-	var servers []*labrpc.ClientEnd
-
+	shardNum := args.ShardNum
 	si := 0
 	for {
 		if kv.killed() {
 			return
 		}
 
+		// If there are new servers for the group, we shall send to new servers
 		if si == len(servers) {
 			if si > 0 {
 				time.Sleep(500 * time.Millisecond)
@@ -479,18 +485,21 @@ func (kv *ShardKV) SendShardRPC(shardNum int, gid int, kvMap map[string]string) 
 
 			si = 0
 
-			servers = []*labrpc.ClientEnd{}
+			var newServers []*labrpc.ClientEnd
 			kv.mu.Lock()
 			for _, name := range kv.currentConfig.Groups[gid] {
-				servers = append(servers, kv.make_end(name))
+				newServers = append(servers, kv.make_end(name))
 			}
 			kv.mu.Unlock()
-			if len(servers) == 0 {
+			if len(newServers) == 0 {
 				CriticalDPrintf("{%v:%v} what?", me, myGid)
 				time.Sleep(300 * time.Millisecond)
 				continue
+			} else {
+				servers = newServers
 			}
 		}
+
 		server := servers[si]
 
 		var reply SendShardReply
@@ -718,7 +727,6 @@ func (kv *ShardKV) ControlDaemon() {
 					} else {
 						kv.lastGetAns[op.ClerkId] = value
 					}
-
 				default:
 				}
 			}
