@@ -56,6 +56,7 @@ type Op struct {
 	ShardTS          int
 	KvMap            map[string]string
 	LastAppliedIndex map[int64]int
+	firstGID         int
 }
 
 type ShardKV struct {
@@ -87,17 +88,18 @@ type ShardKV struct {
 	firstGID         int  // persist
 	initialized      bool // persist
 	dead             int32
+	lastGetAns       map[int64]string
 }
 
-func (kv *ShardKV) GenerateGetResult(key string, reply *GetReply) {
+func (kv *ShardKV) GenerateGetResult(key string, reply *GetReply, clerkId int64) {
 	// Should lock and unlock outside
 	_, _ = DPrintf("{%v:%v} Get (%v): Success", kv.me, kv.gid, key)
-	value, ok := kv.kvMap[key]
-	if ok {
+	value := kv.lastGetAns[clerkId]
+	if value == ErrNoKey{
+		reply.Err = ErrNoKey
+	} else {
 		reply.Err = OK
 		reply.Value = value
-	} else {
-		reply.Err = ErrNoKey
 	}
 }
 
@@ -200,7 +202,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	if kv.lastAppliedIndex[clerkId] >= index {
-		kv.GenerateGetResult(key, reply)
+		kv.GenerateGetResult(key, reply, clerkId)
 		return
 	}
 	if kv.lastWaitingIndex[clerkId] >= index {
@@ -236,7 +238,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 	reply.Value = ""
 	if kv.lastAppliedIndex[clerkId] >= index {
-		kv.GenerateGetResult(key, reply)
+		kv.GenerateGetResult(key, reply, clerkId)
 	} else {
 		if kv.lastWaitingIndex[clerkId] == index {
 			kv.lastWaitingIndex[clerkId] -= 1 // Now I'm failed and I'm not waiting
@@ -387,12 +389,14 @@ func (kv *ShardKV) killed() bool {
 	return z == 1
 }
 
-func (kv *ShardKV) logConfig(configToLog shardmaster.Config) {
+func (kv *ShardKV) logConfig(configToLog shardmaster.Config, firstGID int) {
 	configOp := Op{
 		ClerkId:    0,
 		ClerkIndex: configToLog.Num,
 		OpString:   OpStringConfig,
-		Config:     configToLog}
+		Config:     configToLog,
+		firstGID:   firstGID,
+	}
 	kv.rf.Start(configOp)
 }
 
@@ -404,12 +408,24 @@ func (kv *ShardKV) SendOutShards() {
 			if len(kv.currentConfig.Groups[gid]) == 0 {
 				log.Fatalf("??? config: %v", kv.currentConfig)
 			}
-			go kv.SendShardRPC(shardNum, gid)
+
+			// Challenge 1: Delete
+			kvMap := map[string]string{}
+			for k, v := range kv.kvMap{
+				if key2shard(k) == shardNum{
+					kvMap[k] = v
+					delete(kv.kvMap, k)
+					CriticalDPrintf("{%v:%v} key: %v, shardNum:%v, KvMap: %v",
+						kv.me, kv.gid, k, shardNum, kv.kvMap)
+				}
+			}
+
+			go kv.SendShardRPC(shardNum, gid, kvMap)
 		}
 	}
 }
 
-func (kv *ShardKV) SendShardRPC(shardNum int, gid int) {
+func (kv *ShardKV) SendShardRPC(shardNum int, gid int, kvMap map[string]string) {
 	kv.mu.Lock()
 
 	me := kv.me
@@ -418,14 +434,10 @@ func (kv *ShardKV) SendShardRPC(shardNum int, gid int) {
 	args := SendShardArgs{
 		ShardNum:         shardNum,
 		ShardTS:          kv.shardTS[shardNum] + 1, // +1 ! important!
-		KvMap:            map[string]string{},
+		KvMap:            kvMap,
 		Config:           kv.currentConfig,
 		LastAppliedIndex: map[int64]int{},
-	}
-	for k, v := range kv.kvMap {
-		if key2shard(k) == shardNum {
-			args.KvMap[k] = v
-		}
+		FirstGID:         kv.firstGID,
 	}
 	for k, v := range kv.lastAppliedIndex {
 		args.LastAppliedIndex[k] = v
@@ -454,7 +466,6 @@ func (kv *ShardKV) SendShardRPC(shardNum int, gid int) {
 				servers = append(servers, kv.make_end(name))
 			}
 			kv.mu.Unlock()
-
 			if len(servers) == 0 {
 				CriticalDPrintf("{%v:%v} what?", me, myGid)
 				time.Sleep(300 * time.Millisecond)
@@ -465,7 +476,7 @@ func (kv *ShardKV) SendShardRPC(shardNum int, gid int) {
 
 		var reply SendShardReply
 		CriticalDPrintf("{%v:%v} will send [%v](TS:%v) to {%v}(si:%v), kvMap: %v",
-			me, myGid, shardNum, args.ShardTS, gid, si, kv.kvMap)
+			me, myGid, shardNum, args.ShardTS, gid, si, args.KvMap)
 		ok := server.Call("ShardKV.SendShard", &args, &reply)
 
 		if !ok {
@@ -503,7 +514,7 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 	if args.Config.Num > kv.currentConfig.Num {
 		CriticalDPrintf("{%v:%v} log config: %v",
 			kv.me, kv.gid, args.Config)
-		kv.logConfig(args.Config)
+		kv.logConfig(args.Config, args.FirstGID)
 	}
 
 	shardNum := args.ShardNum
@@ -545,7 +556,7 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 }
 
 func (kv *ShardKV) SignalIfNewest(clerkId int64, idx int) {
-	if kv.lastWaitingIndex[clerkId] == idx &&
+	if kv.lastWaitingIndex[clerkId] <= idx &&
 		kv.lastWaitingCV[clerkId] != nil {
 		kv.lastWaitingCV[clerkId].Signal()
 		kv.lastWaitingCV[clerkId] = nil
@@ -639,6 +650,10 @@ func (kv *ShardKV) ControlDaemon() {
 				kv.me, kv.gid, op.Config, kv.firstGID)
 			kv.currentConfig = op.Config
 
+			if kv.firstGID < 0{
+				kv.firstGID = op.firstGID
+			}
+
 			if kv.firstGID == kv.gid && !kv.initialized {
 				kv.initialized = true
 				// If some shard does not belong to me, I will send them out soon
@@ -677,6 +692,14 @@ func (kv *ShardKV) ControlDaemon() {
 					kv.kvMap[op.Key] = kv.kvMap[op.Key] + op.Value
 				case OpStringPut:
 					kv.kvMap[op.Key] = op.Value
+				case OpStringGet:
+					value, ok := kv.kvMap[op.Key]
+					if !ok{
+						kv.lastGetAns[op.ClerkId] = ErrNoKey
+					} else {
+						kv.lastGetAns[op.ClerkId] = value
+					}
+
 				default:
 				}
 			}
@@ -725,11 +748,12 @@ func (kv *ShardKV) QueryMaster() {
 		kv.firstGID = kv.masterClerk.GetFirstGID()
 		CriticalDPrintf("{%v:%v} firstGID: %v", kv.me, kv.gid, kv.firstGID)
 	}
+
 	_, isLeader := kv.rf.GetState()
 	if isLeader && configRet.Num > kv.waitingConfigIdx {
 		kv.duplicateCount = 0
 		kv.waitingConfigIdx = configRet.Num
-		kv.logConfig(configRet)
+		kv.logConfig(configRet, kv.firstGID)
 		CriticalDPrintf("{%v:%v} get config %v", kv.me, kv.gid, configRet)
 		return
 	}
@@ -786,6 +810,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.duplicateCount = 0
 	kv.firstGID = -1
 	kv.initialized = false
+	kv.lastGetAns = map[int64]string{}
 
 	if kv.persister.SnapshotSize() > 0 {
 		kv.readSnapshot(kv.persister.ReadSnapshot())

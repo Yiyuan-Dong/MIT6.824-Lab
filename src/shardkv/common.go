@@ -13,7 +13,7 @@ import "../shardmaster"
 
 const (
 	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
+	ErrNoKey       = "ErrNoKey#20000930"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrOldRequest  = "ErrOldRequest"
@@ -57,10 +57,11 @@ type GetReply struct {
 }
 
 type SendShardArgs struct{
-	ShardNum int
-	ShardTS  int
-	KvMap    map[string]string
-	Config   shardmaster.Config
+	ShardNum 		  int
+	ShardTS  		  int
+	KvMap    		  map[string]string
+	Config   		  shardmaster.Config
+	FirstGID          int
 	LastAppliedIndex  map[int64]int
 }
 
