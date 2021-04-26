@@ -18,8 +18,8 @@ const MasterQueryGap = 100 * time.Millisecond
 const SendShardsGap = 500 * time.Millisecond
 const DuplicateConfigCount = 10
 
-func Max(x int, y int) int{
-	if x > y{
+func Max(x int, y int) int {
+	if x > y {
 		return x
 	} else {
 		return y
@@ -46,15 +46,15 @@ type Op struct {
 	// otherwise RPC will break.
 
 	// (ClerkId, ClerkIndex) is used to uniquely identify an Op
-	ClerkId    int64
-	ClerkIndex int
-	Key        string
-	Value      string
-	OpString   string
-	Config     shardmaster.Config
-	ShardNum   int
-	ShardTS    int
-	KvMap      map[string]string
+	ClerkId          int64
+	ClerkIndex       int
+	Key              string
+	Value            string
+	OpString         string
+	Config           shardmaster.Config
+	ShardNum         int
+	ShardTS          int
+	KvMap            map[string]string
 	LastAppliedIndex map[int64]int
 }
 
@@ -76,16 +76,16 @@ type ShardKV struct {
 	persister        *raft.Persister
 
 	// variable new added
-	control          [shardmaster.NShards]bool  // persist
-	shardTS          [shardmaster.NShards]int   // persist
+	control          [shardmaster.NShards]bool // persist
+	shardTS          [shardmaster.NShards]int  // persist
 	lastWaitingShard map[int64]int
-	currentConfig    shardmaster.Config         // persist
+	currentConfig    shardmaster.Config // persist
 	masterClerk      *shardmaster.Clerk
 	shardCV          *sync.Cond
 	waitingConfigIdx int
 	duplicateCount   int
-	firstGID         int                        // persist
-	initialed        bool                       // persist
+	firstGID         int  // persist
+	initialized      bool // persist
 	dead             int32
 }
 
@@ -110,7 +110,7 @@ func (kv *ShardKV) EncodeSnapShot() []byte {
 		e.Encode(kv.shardTS) != nil ||
 		e.Encode(kv.currentConfig) != nil ||
 		e.Encode(kv.firstGID) != nil ||
-		e.Encode(kv.initialed) != nil{
+		e.Encode(kv.initialized) != nil {
 		log.Fatal("Error while encoding")
 	}
 	data := w.Bytes()
@@ -130,7 +130,7 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	var shardTS [shardmaster.NShards]int
 	var currentConfig shardmaster.Config
 	var firstGID int
-	var initialed bool
+	var initialized bool
 
 	if d.Decode(&kvMap) != nil ||
 		d.Decode(&lastAppliedIndex) != nil ||
@@ -138,7 +138,7 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 		d.Decode(&shardTS) != nil ||
 		d.Decode(&currentConfig) != nil ||
 		d.Decode(&firstGID) != nil ||
-		d.Decode(&initialed) != nil {
+		d.Decode(&initialized) != nil {
 		log.Fatal("Error while decode")
 	} else {
 		kv.kvMap = kvMap
@@ -147,7 +147,7 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 		kv.shardTS = shardTS
 		kv.currentConfig = currentConfig
 		kv.firstGID = firstGID
-		kv.initialed = initialed
+		kv.initialized = initialized
 	}
 }
 
@@ -387,7 +387,6 @@ func (kv *ShardKV) killed() bool {
 	return z == 1
 }
 
-
 func (kv *ShardKV) logConfig(configToLog shardmaster.Config) {
 	configOp := Op{
 		ClerkId:    0,
@@ -402,7 +401,7 @@ func (kv *ShardKV) SendOutShards() {
 	for shardNum, gid := range kv.currentConfig.Shards {
 		if kv.control[shardNum] && gid != kv.gid {
 			kv.control[shardNum] = false
-			if len(kv.currentConfig.Groups[gid]) == 0{
+			if len(kv.currentConfig.Groups[gid]) == 0 {
 				log.Fatalf("??? config: %v", kv.currentConfig)
 			}
 			go kv.SendShardRPC(shardNum, gid)
@@ -417,10 +416,10 @@ func (kv *ShardKV) SendShardRPC(shardNum int, gid int) {
 	myGid := kv.gid
 
 	args := SendShardArgs{
-		ShardNum: shardNum,
-		ShardTS:  kv.shardTS[shardNum] + 1, // +1 ! important!
-		KvMap:    map[string]string{},
-		Config:   kv.currentConfig,
+		ShardNum:         shardNum,
+		ShardTS:          kv.shardTS[shardNum] + 1, // +1 ! important!
+		KvMap:            map[string]string{},
+		Config:           kv.currentConfig,
 		LastAppliedIndex: map[int64]int{},
 	}
 	for k, v := range kv.kvMap {
@@ -428,7 +427,7 @@ func (kv *ShardKV) SendShardRPC(shardNum int, gid int) {
 			args.KvMap[k] = v
 		}
 	}
-	for k, v := range kv.lastAppliedIndex{
+	for k, v := range kv.lastAppliedIndex {
 		args.LastAppliedIndex[k] = v
 	}
 
@@ -438,12 +437,12 @@ func (kv *ShardKV) SendShardRPC(shardNum int, gid int) {
 
 	si := 0
 	for {
-		if kv.killed(){
+		if kv.killed() {
 			return
 		}
 
-		if si == len(servers){
-			if si > 0{
+		if si == len(servers) {
+			if si > 0 {
 				time.Sleep(500 * time.Millisecond)
 			}
 
@@ -456,7 +455,7 @@ func (kv *ShardKV) SendShardRPC(shardNum int, gid int) {
 			}
 			kv.mu.Unlock()
 
-			if len(servers) == 0{
+			if len(servers) == 0 {
 				CriticalDPrintf("{%v:%v} what?", me, myGid)
 				time.Sleep(300 * time.Millisecond)
 				continue
@@ -465,20 +464,20 @@ func (kv *ShardKV) SendShardRPC(shardNum int, gid int) {
 		server := servers[si]
 
 		var reply SendShardReply
-		CriticalDPrintf("{%v:%v} will send [%v](TS:%v) to {%v}, si:%v",
-			me, myGid, shardNum, args.ShardTS, gid, si)
+		CriticalDPrintf("{%v:%v} will send [%v](TS:%v) to {%v}(si:%v), kvMap: %v",
+			me, myGid, shardNum, args.ShardTS, gid, si, kv.kvMap)
 		ok := server.Call("ShardKV.SendShard", &args, &reply)
 
 		if !ok {
-			CriticalDPrintf("{%v:%v} will send [%v](TS:%v) to {%v}, si:%v, failed",
+			CriticalDPrintf("{%v:%v} sent [%v](TS:%v) to {%v}(si:%v), failed",
 				me, myGid, shardNum, args.ShardTS, gid, si)
 		} else {
 			if reply.Err == OK {
-				CriticalDPrintf("{%v:%v} successfully send [%v](TS:%v) to {%v}, si:%v",
+				CriticalDPrintf("{%v:%v} sent [%v](TS:%v) to {%v}(si:%v), succeeded",
 					me, myGid, shardNum, args.ShardTS, gid, si)
 				return
 			} else {
-				CriticalDPrintf("{%v:%v} try send [%v](TS:%v) to {%v}, si:%v, Wrong leader",
+				CriticalDPrintf("{%v:%v} sent [%v](TS:%v) to {%v}(si:%v), Wrong leader",
 					me, myGid, shardNum, args.ShardTS, gid, si)
 			}
 		}
@@ -512,20 +511,20 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 		return
 	}
 
-	CriticalDPrintf("{%v:%v} will log shard[%v](TS:%v)",
-		kv.me, kv.gid, args.ShardNum, args.ShardTS)
+	CriticalDPrintf("{%v:%v} will log shard[%v](TS:%v), kvMap: %v",
+		kv.me, kv.gid, args.ShardNum, args.ShardTS, args.KvMap)
 	opCommand := Op{
-		ShardNum: shardNum,
-		KvMap:    map[string]string{},
-		ShardTS:  args.ShardTS,
-		OpString: OpStringKvMap,
+		ShardNum:         shardNum,
+		KvMap:            map[string]string{},
+		ShardTS:          args.ShardTS,
+		OpString:         OpStringKvMap,
 		LastAppliedIndex: map[int64]int{},
 	}
 
 	for k, v := range args.KvMap {
 		opCommand.KvMap[k] = v
 	}
-	for k, v := range args.LastAppliedIndex{
+	for k, v := range args.LastAppliedIndex {
 		opCommand.LastAppliedIndex[k] = v
 	}
 
@@ -606,8 +605,8 @@ func (kv *ShardKV) ControlDaemon() {
 				continue
 			}
 
-			CriticalDPrintf("{%v:%v} applied [%v](TS: %v)",
-				kv.me, kv.gid, op.ShardNum, op.ShardTS)
+			CriticalDPrintf("{%v:%v} applied [%v](TS: %v), kvMap: %v",
+				kv.me, kv.gid, op.ShardNum, op.ShardTS, op.KvMap)
 
 			kv.control[op.ShardNum] = true
 			kv.shardTS[op.ShardNum] = op.ShardTS
@@ -619,7 +618,7 @@ func (kv *ShardKV) ControlDaemon() {
 			for k, v := range op.KvMap {
 				kv.kvMap[k] = v
 			}
-			for k, v := range op.LastAppliedIndex{
+			for k, v := range op.LastAppliedIndex {
 				kv.lastAppliedIndex[k] = Max(kv.lastAppliedIndex[k], v)
 			}
 
@@ -636,14 +635,14 @@ func (kv *ShardKV) ControlDaemon() {
 				continue
 			}
 
-			CriticalDPrintf("{%v:%v} apply config %v",
-				kv.me, kv.gid, op.Config)
+			CriticalDPrintf("{%v:%v} apply config %v, firstGID: %v",
+				kv.me, kv.gid, op.Config, kv.firstGID)
 			kv.currentConfig = op.Config
 
-			if kv.firstGID == kv.gid && !kv.initialed{
-				kv.initialed = true
+			if kv.firstGID == kv.gid && !kv.initialized {
+				kv.initialized = true
 				// If some shard does not belong to me, I will send them out soon
-				for i, _ := range kv.control{
+				for i := range kv.control {
 					kv.control[i] = true
 					kv.shardTS[i] = 1
 				}
@@ -722,8 +721,9 @@ func (kv *ShardKV) QueryMaster() {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	if kv.firstGID < 0{
+	if kv.firstGID < 0 {
 		kv.firstGID = kv.masterClerk.GetFirstGID()
+		CriticalDPrintf("{%v:%v} firstGID: %v", kv.me, kv.gid, kv.firstGID)
 	}
 	_, isLeader := kv.rf.GetState()
 	if isLeader && configRet.Num > kv.waitingConfigIdx {
@@ -785,9 +785,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.waitingConfigIdx = 0
 	kv.duplicateCount = 0
 	kv.firstGID = -1
-	kv.initialed = false
+	kv.initialized = false
 
-	if kv.persister.SnapshotSize() > 0{
+	if kv.persister.SnapshotSize() > 0 {
 		kv.readSnapshot(kv.persister.ReadSnapshot())
 		DPrintf("{%v:%v} read snapshot, kvMap: %v, control: %v, currentConfig: %v",
 			kv.me, kv.gid, kv.kvMap, kv.control, kv.currentConfig)
@@ -798,7 +798,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go func() {
 		newTimer := time.NewTimer(MasterQueryGap)
 		for {
-			if kv.killed(){
+			if kv.killed() {
 				return
 			}
 			kv.QueryMaster()
