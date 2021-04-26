@@ -61,6 +61,7 @@ type SendShardArgs struct{
 	ShardTS  int
 	KvMap    map[string]string
 	Config   shardmaster.Config
+	LastAppliedIndex  map[int64]int
 }
 
 type SendShardReply struct{
