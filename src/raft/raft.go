@@ -799,7 +799,7 @@ func (rf *Raft) SendAppendOrSnapshot(server int) {
 			}
 		}
 
-		//time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 
 }

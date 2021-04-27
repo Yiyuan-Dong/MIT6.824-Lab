@@ -82,8 +82,8 @@ type Op struct {
 	ShardTS          int
 	KvMap            map[string]string
 	LastAppliedIndex map[int64]int
-	lastGetAns       map[int64]string
-	firstGID         int
+	LastGetAns       map[int64]string
+	FirstGID         int
 }
 
 type ShardKV struct {
@@ -435,7 +435,7 @@ func (kv *ShardKV) logConfig(configToLog shardmaster.Config, firstGID int) {
 		ClerkIndex: configToLog.Num,
 		OpString:   OpStringConfig,
 		Config:     configToLog,
-		firstGID:   firstGID,
+		FirstGID:   firstGID,
 	}
 	kv.rf.Start(configOp)
 }
@@ -460,7 +460,7 @@ func (kv *ShardKV) SendOutShards() {
 					kvMap[k] = v
 					kv.sendOutLogs[shardNum].KvMap[k] = v
 					delete(kv.kvMap, k)
-					CriticalDPrintf("{%v:%v} key: %v, shardNum:%v, KvMap: %v",
+					CriticalDPrintf("{%v:%v} key: %v, shardNum:[%v], KvMap: %v",
 						kv.me, kv.gid, k, shardNum, kv.kvMap)
 				}
 			}
@@ -608,7 +608,7 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 		ShardTS:          args.ShardTS,
 		OpString:         OpStringKvMap,
 		LastAppliedIndex: map[int64]int{},
-		lastGetAns:       map[int64]string{},
+		LastGetAns:       map[int64]string{},
 	}
 
 	for k, v := range args.KvMap {
@@ -618,7 +618,7 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 		opCommand.LastAppliedIndex[k] = v
 	}
 	for k, v := range args.LastGetAns {
-		opCommand.lastGetAns[k] = v
+		opCommand.LastGetAns[k] = v
 	}
 
 	_, _, isLeader = kv.rf.Start(opCommand)
@@ -714,7 +714,7 @@ func (kv *ShardKV) ControlDaemon() {
 			for k, v := range op.LastAppliedIndex {
 				if v > kv.lastAppliedIndex[k] {
 					kv.lastAppliedIndex[k] = v
-					kv.lastGetAns[k] = op.lastGetAns[k]
+					kv.lastGetAns[k] = op.LastGetAns[k]
 				}
 			}
 
@@ -732,11 +732,11 @@ func (kv *ShardKV) ControlDaemon() {
 			}
 
 			CriticalDPrintf("{%v:%v} apply config %v, firstGID: %v",
-				kv.me, kv.gid, op.Config, kv.firstGID)
+				kv.me, kv.gid, op.Config, op.FirstGID)
 			kv.currentConfig = op.Config
 
 			if kv.firstGID < 0 {
-				kv.firstGID = op.firstGID
+				kv.firstGID = op.FirstGID
 			}
 
 			if kv.firstGID == kv.gid && !kv.initialized {
@@ -832,7 +832,8 @@ func (kv *ShardKV) QueryMaster() {
 
 	if kv.firstGID < 0 {
 		kv.firstGID = kv.masterClerk.GetFirstGID()
-		CriticalDPrintf("{%v:%v} firstGID: %v", kv.me, kv.gid, kv.firstGID)
+		CriticalDPrintf("{%v:%v} firstGID: %v, ConfigNum: %v",
+			kv.me, kv.gid, kv.firstGID, configRet.Num)
 	}
 
 	_, isLeader := kv.rf.GetState()
@@ -900,8 +901,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	if kv.persister.SnapshotSize() > 0 {
 		kv.readSnapshot(kv.persister.ReadSnapshot())
-		DPrintf("{%v:%v} read snapshot, kvMap: %v, control: %v, currentConfig: %v",
-			kv.me, kv.gid, kv.kvMap, kv.control, kv.currentConfig)
+		DPrintf("{%v:%v} read snapshot, kvMap: %v, control: %v, currentConfig: %v, sendOutLogs: %v",
+			kv.me, kv.gid, kv.kvMap, kv.control, kv.currentConfig, kv.sendOutLogs)
 
 		for shardNum, sendOutLog := range kv.sendOutLogs{
 			if sendOutLog.TimeStamp == kv.shardTS[shardNum] &&
