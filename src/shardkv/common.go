@@ -57,12 +57,13 @@ type GetReply struct {
 }
 
 type SendShardArgs struct{
-	ShardNum 		  int
-	ShardTS  		  int
-	KvMap    		  map[string]string
-	Config   		  shardmaster.Config
-	FirstGID          int
-	LastAppliedIndex  map[int64]int
+	ShardNum         int
+	ShardTS          int
+	KvMap            map[string]string
+	Config           shardmaster.Config
+	FirstGID         int
+	LastAppliedIndex map[int64]int
+	LastGetAns       map[int64]string
 }
 
 type SendShardReply struct{

@@ -5,9 +5,9 @@ Dyy来介绍一些核心的设计想法:
 	比如当前某clerk最新的idx是7，而你的RPC的idx是6，那么你在
 	wait()被唤醒时检查lastAppliedIndex==7会认为7>6，所以你认
 	为请求被满足了。但是很有可能满足的是7，而6因为WrongGroup之
-	类的原因没有被执行。
+	类的原因没有被执行。lastGetAns同理
 	但这没有关系，因为clerk一次只执行一个请求，所以如果有idx更高
-	的请求，那么之前的请求返回什么都没关心，因为clerk不再等他了
+	的请求，那么之前的请求返回什么都没关系，因为clerk不再等他了
 
 2.control
 	control代表了“控制权”的思想，他有两个特点:
@@ -73,6 +73,7 @@ type Op struct {
 	ShardTS          int
 	KvMap            map[string]string
 	LastAppliedIndex map[int64]int
+	lastGetAns       map[int64]string
 	firstGID         int
 }
 
@@ -110,7 +111,6 @@ type ShardKV struct {
 
 func (kv *ShardKV) GenerateGetResult(key string, reply *GetReply, clerkId int64) {
 	// Should lock and unlock outside
-	_, _ = DPrintf("{%v:%v} Get (%v): Success", kv.me, kv.gid, key)
 	value := kv.lastGetAns[clerkId]
 	if value == ErrNoKey {
 		reply.Err = ErrNoKey
@@ -118,6 +118,7 @@ func (kv *ShardKV) GenerateGetResult(key string, reply *GetReply, clerkId int64)
 		reply.Err = OK
 		reply.Value = value
 	}
+	_, _ = DPrintf("{%v:%v} Get (%v): Success, value: %v", kv.me, kv.gid, key, value)
 }
 
 func (kv *ShardKV) EncodeSnapShot() []byte {
@@ -171,12 +172,12 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 }
 
 /**
- 这里有点复杂要用中文...
- 本来的设计是如果applyCh说我已经不是leader了,那么Signal()所有的
- CV.但是有一种情况是:我写了几个log,新leader来了覆盖了这些log,但是
- 还没有来得及apply我又当回了leader.这时候CV没有被提醒,[]waitingIndex
- 没有被改变使得这个log明明没有在广播却也不能重新让leader广播.这时候就
- 需要超时Signal()机制
+这里有点复杂要用中文...
+本来的设计是如果applyCh说我已经不是leader了,那么Signal()所有的
+CV.但是有一种情况是:我写了几个log,新leader来了覆盖了这些log,但是
+还没有来得及apply我又当回了leader.这时候CV没有被提醒,[]waitingIndex
+没有被改变使得这个log明明没有在广播却也不能重新让leader广播.这时候就
+需要超时Signal()机制
 */
 func TimeOutRoutine(cv *sync.Cond) {
 	timer := time.NewTimer(2 * time.Second)
@@ -447,6 +448,10 @@ func (kv *ShardKV) SendOutShards() {
 			for k, v := range kv.lastAppliedIndex {
 				lastAppliedIndex[k] = v
 			}
+			lastGetAns := map[int64]string{}
+			for k, v := range kv.lastGetAns{
+				lastGetAns[k] = v
+			}
 
 			args := SendShardArgs{
 				ShardNum:         shardNum,
@@ -455,6 +460,7 @@ func (kv *ShardKV) SendOutShards() {
 				Config:           kv.currentConfig,
 				LastAppliedIndex: lastAppliedIndex,
 				FirstGID:         kv.firstGID,
+				LastGetAns:       lastGetAns,
 			}
 
 			go kv.SendShardRPC(gid, args, servers)
@@ -558,6 +564,7 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 		ShardTS:          args.ShardTS,
 		OpString:         OpStringKvMap,
 		LastAppliedIndex: map[int64]int{},
+		lastGetAns:       map[int64]string{},
 	}
 
 	for k, v := range args.KvMap {
@@ -565,6 +572,9 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 	}
 	for k, v := range args.LastAppliedIndex {
 		opCommand.LastAppliedIndex[k] = v
+	}
+	for k, v := range args.LastGetAns {
+		opCommand.lastGetAns[k] = v
 	}
 
 	_, _, isLeader = kv.rf.Start(opCommand)
@@ -658,7 +668,10 @@ func (kv *ShardKV) ControlDaemon() {
 				kv.kvMap[k] = v
 			}
 			for k, v := range op.LastAppliedIndex {
-				kv.lastAppliedIndex[k] = Max(kv.lastAppliedIndex[k], v)
+				if v > kv.lastAppliedIndex[k] {
+					kv.lastAppliedIndex[k] = v
+					kv.lastGetAns[k] = op.lastGetAns[k]
+				}
 			}
 
 			kv.shardCV.Signal()
@@ -721,6 +734,8 @@ func (kv *ShardKV) ControlDaemon() {
 				case OpStringPut:
 					kv.kvMap[op.Key] = op.Value
 				case OpStringGet:
+					DPrintf("{%v:%v}, key: %v, kvMap: %v",
+						kv.me, kv.gid, op.Key, kv.kvMap)
 					value, ok := kv.kvMap[op.Key]
 					if !ok {
 						kv.lastGetAns[op.ClerkId] = ErrNoKey
