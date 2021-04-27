@@ -1,18 +1,27 @@
 /**
-Dyy来介绍一些核心的设计想法:
+Dyy来介绍一些设计想法:
 1.lastApplied:
 	如果阅读代码会发现无论是Get()还是PutAppend()都有一个问题:
 	比如当前某clerk最新的idx是7，而你的RPC的idx是6，那么你在
 	wait()被唤醒时检查lastAppliedIndex==7会认为7>6，所以你认
 	为请求被满足了。但是很有可能满足的是7，而6因为WrongGroup之
-	类的原因没有被执行。lastGetAns同理
+	类的原因没有被执行。lastGetAns同理。
 	但这没有关系，因为clerk一次只执行一个请求，所以如果有idx更高
-	的请求，那么之前的请求返回什么都没关系，因为clerk不再等他了
+	的请求，那么之前的请求返回什么都没关系，因为clerk不再等他了。
 
 2.control
 	control代表了“控制权”的思想，他有两个特点:
-	i.  任意时刻只有零个或一个group有某一shard的控制权
-	ii. 只有log的apply可以改变控制权
+	i.  任意时刻只有零个或一个group有某一shard的控制权。
+	ii. 只有log的apply可以改变控制权。
+
+3.SendOutLog
+	有这样一个很严肃的问题:一旦一个Config被apply,那些原本属于我而如
+	今不属于我的shard会被送出去并被删除。但问题是有可能我开始发送shard，
+	还没送完，整个group就挂了，而且删除键值对之后的状态还被快照保存了。
+	那么第一，重新启动后的系统不知道他有个被删掉的shard其实没有真正发出去;
+	第二，就算他想重新发一遍，数据已经被删了。
+	所以搞出了一个SendOutLog，思想是如果想要往外发一个shard，就在这里记
+	下，如果发送成功了，再把它删掉。每次重启时检查有没有残存的Log。
  */
 
 package shardkv
@@ -107,6 +116,13 @@ type ShardKV struct {
 	initialized      bool // persist
 	dead             int32
 	lastGetAns       map[int64]string
+	sendOutLogs      [shardmaster.NShards]SendOutLog  // persist
+}
+
+type SendOutLog struct {
+	GID       int
+	TimeStamp int
+	KvMap     map[string]string
 }
 
 func (kv *ShardKV) GenerateGetResult(key string, reply *GetReply, clerkId int64) {
@@ -130,7 +146,8 @@ func (kv *ShardKV) EncodeSnapShot() []byte {
 		e.Encode(kv.shardTS) != nil ||
 		e.Encode(kv.currentConfig) != nil ||
 		e.Encode(kv.firstGID) != nil ||
-		e.Encode(kv.initialized) != nil {
+		e.Encode(kv.initialized) != nil ||
+		e.Encode(kv.sendOutLogs) != nil {
 		log.Fatal("Error while encoding")
 	}
 	data := w.Bytes()
@@ -151,6 +168,7 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	var currentConfig shardmaster.Config
 	var firstGID int
 	var initialized bool
+	var sendOutLogs [shardmaster.NShards]SendOutLog
 
 	if d.Decode(&kvMap) != nil ||
 		d.Decode(&lastAppliedIndex) != nil ||
@@ -158,7 +176,8 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 		d.Decode(&shardTS) != nil ||
 		d.Decode(&currentConfig) != nil ||
 		d.Decode(&firstGID) != nil ||
-		d.Decode(&initialized) != nil {
+		d.Decode(&initialized) != nil ||
+		d.Decode(&sendOutLogs) != nil {
 		log.Fatal("Error while decode")
 	} else {
 		kv.kvMap = kvMap
@@ -168,6 +187,7 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 		kv.currentConfig = currentConfig
 		kv.firstGID = firstGID
 		kv.initialized = initialized
+		kv.sendOutLogs = sendOutLogs
 	}
 }
 
@@ -424,9 +444,13 @@ func (kv *ShardKV) SendOutShards() {
 	// Should acquire lock outside the function
 	for shardNum, gid := range kv.currentConfig.Shards {
 		if kv.control[shardNum] && gid != kv.gid {
+
 			kv.control[shardNum] = false
-			if len(kv.currentConfig.Groups[gid]) == 0 {
-				log.Fatalf("??? config: %v", kv.currentConfig)
+			// Construct a SendOutLog
+			kv.sendOutLogs[shardNum] = SendOutLog{
+				GID:       gid,
+				TimeStamp: kv.shardTS[shardNum],
+				KvMap:     map[string]string{},
 			}
 
 			// Challenge 1: Delete
@@ -434,6 +458,7 @@ func (kv *ShardKV) SendOutShards() {
 			for k, v := range kv.kvMap {
 				if key2shard(k) == shardNum {
 					kvMap[k] = v
+					kv.sendOutLogs[shardNum].KvMap[k] = v
 					delete(kv.kvMap, k)
 					CriticalDPrintf("{%v:%v} key: %v, shardNum:%v, KvMap: %v",
 						kv.me, kv.gid, k, shardNum, kv.kvMap)
@@ -520,6 +545,17 @@ func (kv *ShardKV) SendShardRPC(gid int, args SendShardArgs, servers []*labrpc.C
 			if reply.Err == OK {
 				CriticalDPrintf("{%v:%v} sent [%v](TS:%v) to {%v}(si:%v), succeeded",
 					me, myGid, shardNum, args.ShardTS, gid, si)
+
+				// Delete SendOutLog
+				kv.mu.Lock()
+				if kv.sendOutLogs[shardNum].TimeStamp == args.ShardTS{
+					kv.sendOutLogs[shardNum] = SendOutLog{
+						GID:      -1,
+						TimeStamp: 0,
+					}
+				}
+				kv.mu.Unlock()
+
 				return
 			} else {
 				CriticalDPrintf("{%v:%v} sent [%v](TS:%v) to {%v}(si:%v), Wrong leader",
@@ -554,6 +590,14 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 	shardNum := args.ShardNum
 	if kv.shardTS[shardNum] >= args.ShardTS {
 		return
+	}
+
+	if kv.sendOutLogs[shardNum].TimeStamp < args.ShardTS{
+		kv.sendOutLogs[shardNum] =
+			SendOutLog{
+				GID:      -1,
+				TimeStamp: 0,
+			}
 	}
 
 	CriticalDPrintf("{%v:%v} will log shard[%v](TS:%v), kvMap: %v",
@@ -858,6 +902,43 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		kv.readSnapshot(kv.persister.ReadSnapshot())
 		DPrintf("{%v:%v} read snapshot, kvMap: %v, control: %v, currentConfig: %v",
 			kv.me, kv.gid, kv.kvMap, kv.control, kv.currentConfig)
+
+		for shardNum, sendOutLog := range kv.sendOutLogs{
+			if sendOutLog.TimeStamp == kv.shardTS[shardNum] &&
+				sendOutLog.TimeStamp > 0{
+
+				var servers []*labrpc.ClientEnd
+				for _, name := range kv.currentConfig.Groups[sendOutLog.GID]{
+					servers = append(servers, kv.make_end(name))
+				}
+				lastAppliedIndex := map[int64]int{}
+				for k, v := range kv.lastAppliedIndex {
+					lastAppliedIndex[k] = v
+				}
+				lastGetAns := map[int64]string{}
+				for k, v := range kv.lastGetAns{
+					lastGetAns[k] = v
+				}
+				kvMap := map[string]string{}
+				for k, v := range sendOutLog.KvMap {
+					kvMap[k] = v
+				}
+
+				args := SendShardArgs{
+					ShardNum:         shardNum,
+					ShardTS:          kv.shardTS[shardNum] + 1, // +1 ! important!
+					KvMap:            kvMap,
+					Config:           kv.currentConfig,
+					LastAppliedIndex: lastAppliedIndex,
+					FirstGID:         kv.firstGID,
+					LastGetAns:       lastGetAns,
+				}
+
+				CriticalDPrintf("{%v:%v} resend [%v]", kv.me, kv.gid, shardNum)
+				go kv.SendShardRPC(sendOutLog.GID, args, servers)
+			}
+		}
+
 	} else {
 		DPrintf("{%v:%v} start!", kv.me, kv.gid)
 	}
