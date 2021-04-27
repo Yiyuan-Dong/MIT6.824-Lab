@@ -32,7 +32,7 @@ const (
 	ConstStateLeader           = 0
 	ConstStateFollower         = 1
 	ConstStateCandidate        = 2
-	ConstElectionTimeoutElapse = 500 // would be used as (X + rand.intn(X))
+	ConstElectionTimeoutElapse = 400 // would be used as (X + rand.intn(X))
 	ConstLeaderIdle            = 200 * time.Millisecond
 	ConstRetryGap              = 200 * time.Millisecond
 )
@@ -462,16 +462,7 @@ func (rf *Raft) sendRequestVote(server, me, currentTerm, lastIndex, lastTerm int
 
 			_, _ = DPrintf("[%v](%v) fail to send RequestVote RPC to [%v]", me, currentTerm, server)
 
-			rf.mu.Lock()
-
-			if rf.currentTerm != currentTerm || rf.state != ConstStateCandidate{
-				rf.mu.Unlock()
-				return
-			}
-
-			rf.mu.Unlock()
-
-			time.Sleep(ConstRetryGap)
+			return
 		}
 	}
 
@@ -799,7 +790,7 @@ func (rf *Raft) SendAppendOrSnapshot(server int) {
 			}
 		}
 
-		time.Sleep(10 * time.Millisecond)
+		//time.Sleep(10 * time.Millisecond)
 	}
 
 }

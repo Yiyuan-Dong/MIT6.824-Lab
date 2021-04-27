@@ -956,24 +956,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		}
 	}()
 
-	//go func() {
-	//	newTimer := time.NewTimer(SendShardsGap)
-	//	for {
-	//		newTimer.Reset(SendShardsGap)
-	//		<-newTimer.C
-	//		if kv.killed(){
-	//			return
-	//		}
-	//		_, isLeader := kv.rf.GetState()
-	//		if isLeader {
-	//			kv.mu.Lock()
-	//			CriticalDPrintf("{%v:%v}", kv.me, kv.gid)
-	//			kv.SendOutShards()
-	//			kv.mu.Unlock()
-	//		}
-	//	}
-	//}()
-
 	go kv.ControlDaemon()
 
 	return kv
