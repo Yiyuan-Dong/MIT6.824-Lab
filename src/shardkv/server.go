@@ -39,7 +39,7 @@ import "sync"
 import "../labgob"
 import "../shardmaster"
 
-const Debug = 1
+const Debug = 0
 const MasterQueryGap = 100 * time.Millisecond
 const SendShardsGap = 500 * time.Millisecond
 const DuplicateConfigCount = 10
