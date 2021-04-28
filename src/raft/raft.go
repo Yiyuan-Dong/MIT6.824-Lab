@@ -1099,5 +1099,6 @@ func (rf *Raft) SaveSnapshot(index int, snapshot []byte) bool {
 		rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), snapshot)
 		return true
 	}
+
 	return false
 }

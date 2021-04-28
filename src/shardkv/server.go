@@ -39,7 +39,7 @@ import "sync"
 import "../labgob"
 import "../shardmaster"
 
-const Debug = 0
+const Debug = 1
 const MasterQueryGap = 100 * time.Millisecond
 const SendShardsGap = 500 * time.Millisecond
 const DuplicateConfigCount = 10
@@ -511,7 +511,7 @@ func (kv *ShardKV) SendShardRPC(gid int, args SendShardArgs, servers []*labrpc.C
 		// If there are new servers for the group, we shall send to new servers
 		if si == len(servers) {
 			if si > 0 {
-				time.Sleep(500 * time.Millisecond)
+				time.Sleep(1000 * time.Millisecond)
 			}
 
 			si = 0
@@ -519,7 +519,7 @@ func (kv *ShardKV) SendShardRPC(gid int, args SendShardArgs, servers []*labrpc.C
 			var newServers []*labrpc.ClientEnd
 			kv.mu.Lock()
 			for _, name := range kv.currentConfig.Groups[gid] {
-				newServers = append(servers, kv.make_end(name))
+				newServers = append(newServers, kv.make_end(name))
 			}
 			kv.mu.Unlock()
 			if len(newServers) == 0 {
@@ -544,14 +544,16 @@ func (kv *ShardKV) SendShardRPC(gid int, args SendShardArgs, servers []*labrpc.C
 		tempCh := make(chan bool)
 
 		go func() {
-			timer := time.NewTimer(500 * time.Millisecond)
+			timer := time.NewTimer(1000 * time.Millisecond)
 			<- timer.C
 			tempCh <- false
+			CriticalDPrintf("DRAIN1")
 		}()
 
 		go func() {
 			callRet := server.Call("ShardKV.SendShard", &args, &reply)
 			tempCh <- callRet
+			CriticalDPrintf("DRAIN2")
 		}()
 
 		ok := <- tempCh
