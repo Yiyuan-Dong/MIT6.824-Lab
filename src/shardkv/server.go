@@ -536,7 +536,29 @@ func (kv *ShardKV) SendShardRPC(gid int, args SendShardArgs, servers []*labrpc.C
 		var reply SendShardReply
 		CriticalDPrintf("{%v:%v} will send [%v](TS:%v) to {%v}(si:%v), kvMap: %v",
 			me, myGid, shardNum, args.ShardTS, gid, si, args.KvMap)
-		ok := server.Call("ShardKV.SendShard", &args, &reply)
+
+		// 有一种神秘的情况是某个server接受了我的shard，结果过了一会儿他不当
+		// raft leader了，我的shard log也尸骨无存，这时候我不能傻等，不然就
+		// 死循环了
+
+		tempCh := make(chan bool)
+
+		go func() {
+			timer := time.NewTimer(500 * time.Millisecond)
+			<- timer.C
+			tempCh <- false
+		}()
+
+		go func() {
+			callRet := server.Call("ShardKV.SendShard", &args, &reply)
+			tempCh <- callRet
+		}()
+
+		ok := <- tempCh
+		go func() {
+			// drain another goroutine
+			<- tempCh
+		}()
 
 		if !ok {
 			CriticalDPrintf("{%v:%v} sent [%v](TS:%v) to {%v}(si:%v), failed",

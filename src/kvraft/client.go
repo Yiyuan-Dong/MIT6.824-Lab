@@ -74,10 +74,7 @@ func (ck *Clerk) Get(key string) string {
 			ck.mu.Unlock()
 
 			<- timer.C
-
-			ck.mu.Lock()
 			cv.Signal()
-			ck.mu.Unlock()
 		}
 	}()
 
@@ -170,9 +167,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 			<- timer.C
 
-			ck.mu.Lock()
 			cv.Signal()
-			ck.mu.Unlock()
 		}
 	}()
 
