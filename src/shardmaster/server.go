@@ -4,13 +4,13 @@ import (
 	"../raft"
 	"fmt"
 	"log"
-	"time"
+	"sort"
 )
 import "../labrpc"
 import "sync"
 import "../labgob"
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -49,6 +49,7 @@ type ShardMaster struct {
 	lastWaitingCV    map[int64]*sync.Cond
 	persister        *raft.Persister
 	firstGID         int
+	raftTerm         int
 }
 
 
@@ -80,15 +81,38 @@ func Max(x int, y int) int{
 	}
 }
 
-func TimeOutRoutine(cv *sync.Cond) {
-	// 这里有点复杂要用中文...
-	// 本来的设计是如果applyCh说我已经不是leader了，那么Signal()所有的
-	// CV。但是有一种情况是:我写了几个log，新leader来了覆盖了这些log，但是
-	// 还没有来得及apply我又当回了leader。这时候CV没有被提醒，需要用超时
-	// Signal()去提醒
-	timer := time.NewTimer(2 * time.Second)
-	<-timer.C
-	cv.Signal()
+/**
+  (现在我用CheckState()处理这种情况了)
+  这里有点复杂要用中文...
+  本来的设计是如果applyCh说我已经不是leader了，那么Signal()所有的
+  CV。但是有一种情况是:我写了几个log，新leader来了覆盖了这些log，但是
+  还没有来得及apply我又当回了leader。这时候CV没有被提醒，[]waitingIndex
+  没有被改变使得这个log明明没有在广播却也不能重新让leader广播。这时候就
+  需要超时Signal()机制
+*/
+
+//func TimeOutRoutine(cv *sync.Cond) {
+//	timer := time.NewTimer(2 * time.Second)
+//	<-timer.C
+//	cv.Signal()
+//}
+
+func (kv *ShardMaster) CheckState() bool {
+	term, isLeader := kv.rf.GetState()
+	if term > kv.raftTerm {
+		kv.SignalWaitingCV()
+		kv.raftTerm = term
+	}
+	return isLeader
+}
+
+func (kv *ShardMaster)SignalWaitingCV(){
+	for k, v := range kv.lastWaitingCV {
+		if v != nil {
+			v.Signal()
+			kv.lastWaitingCV[k] = nil
+		}
+	}
 }
 
 func (sm *ShardMaster) Solve(clerkId int64, index int,
@@ -97,7 +121,7 @@ func (sm *ShardMaster) Solve(clerkId int64, index int,
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	_, isLeader := sm.rf.GetState()
+	isLeader := sm.CheckState()
 
 	me := sm.me
 
@@ -131,8 +155,6 @@ func (sm *ShardMaster) Solve(clerkId int64, index int,
 	cv := sync.NewCond(&sm.mu)
 	sm.lastWaitingIndex[clerkId] = index
 	sm.lastWaitingCV[clerkId] = cv
-
-	go TimeOutRoutine(cv)
 
 	cv.Wait()
 
@@ -228,7 +250,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	reply.WrongLeader = true
 
 	// Your code here.
-	_, isLeader := sm.rf.GetState()
+	isLeader := sm.CheckState()
 
 	me := sm.me
 	clerkId := args.ClerkId
@@ -267,8 +289,6 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	cv := sync.NewCond(&sm.mu)
 	sm.lastWaitingIndex[clerkId] = index
 	sm.lastWaitingCV[args.ClerkId] = cv
-
-	go TimeOutRoutine(cv)
 
 	cv.Wait()
 
@@ -401,13 +421,9 @@ func (sm *ShardMaster) ControlDaemon() {
 
 		_, _ = DPrintf("{%v} apply log [%v]: %v", sm.me, applyMsg.CommandIndex, applyMsg.Command)
 
-		if !applyMsg.IsLeader {
-			for k, v := range sm.lastWaitingCV {
-				if v != nil {
-					v.Signal()
-					sm.lastWaitingCV[k] = nil
-				}
-			}
+		if applyMsg.LogTerm > sm.raftTerm {
+			applyMsg.LogTerm = sm.raftTerm
+			sm.SignalWaitingCV()
 		}
 
 		op := applyMsg.Command.(Op)
@@ -424,14 +440,20 @@ func (sm *ShardMaster) ControlDaemon() {
 						sm.me, v, sm.configs[sm.configsCount - 1], sm.order)
 				}
 			case OpStringJoin:
-				if sm.configsCount == 1{
-					for k ,_ := range op.JoinServers{
-						sm.firstGID = k
-						break
-					}
+				var gids []int
+				for k, _ := range op.JoinServers{
+					gids = append(gids, k)
 				}
+				sort.Ints(gids)
+
+				if sm.configsCount == 1{
+					sm.firstGID = gids[0]
+				}
+
 				sm.CopyLastConfig()
-				for k, v := range op.JoinServers{
+
+				for _, k := range gids{
+					v := op.JoinServers[k]
 					sm.JoinOne(k)
 					sm.configs[sm.configsCount - 1].Groups[k] = v
 					_, _ = DPrintf("{%v} join %v, config: %v, order: %v",
@@ -477,6 +499,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.lastWaitingCV = map[int64]*sync.Cond{}
 	sm.persister = persister
 	sm.firstGID = -1
+	sm.raftTerm = -1
 
 	// Your code here.
 	go sm.ControlDaemon()

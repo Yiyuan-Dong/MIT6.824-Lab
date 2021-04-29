@@ -8,7 +8,6 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 const Debug = 0
@@ -54,6 +53,7 @@ type KVServer struct {
 	lastWaitingIndex map[int64]int
 	lastWaitingCV    map[int64]*sync.Cond
 	persister        *raft.Persister
+	raftTerm         int
 	//commitIndex     int
 }
 
@@ -69,16 +69,38 @@ func (kv *KVServer) GenerateGetResult(key string, reply *GetReply) {
 	}
 }
 
-func TimeOutRoutine(cv *sync.Cond) {
-	// 这里有点复杂要用中文...
-	// 本来的设计是如果applyCh说我已经不是leader了，那么Signal()所有的
-	// CV。但是有一种情况是:我写了几个log，新leader来了覆盖了这些log，但是
-	// 还没有来得及apply我又当回了leader。这时候CV没有被提醒，[]waitingIndex
-	// 没有被改变使得这个log明明没有在广播却也不能重新让leader广播。这时候就
-	// 需要超时Signal()机制
-	timer := time.NewTimer(2 * time.Second)
-	<-timer.C
-	cv.Signal()
+/**
+  (现在我用CheckState()处理这种情况了)
+  这里有点复杂要用中文...
+  本来的设计是如果applyCh说我已经不是leader了，那么Signal()所有的
+  CV。但是有一种情况是:我写了几个log，新leader来了覆盖了这些log，但是
+  还没有来得及apply我又当回了leader。这时候CV没有被提醒，[]waitingIndex
+  没有被改变使得这个log明明没有在广播却也不能重新让leader广播。这时候就
+  需要超时Signal()机制
+ */
+
+//func TimeOutRoutine(cv *sync.Cond) {
+//	timer := time.NewTimer(2 * time.Second)
+//	<-timer.C
+//	cv.Signal()
+//}
+
+func (kv *KVServer) CheckState() bool {
+	term, isLeader := kv.rf.GetState()
+	if term > kv.raftTerm {
+		kv.SignalWaitingCV()
+		kv.raftTerm = term
+	}
+	return isLeader
+}
+
+func (kv *KVServer)SignalWaitingCV(){
+	for k, v := range kv.lastWaitingCV {
+		if v != nil {
+			v.Signal()
+			kv.lastWaitingCV[k] = nil
+		}
+	}
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -86,7 +108,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	defer kv.mu.Unlock()
 
 	// Your code here.
-	_, isLeader := kv.rf.GetState()
+	//_, isLeader := kv.rf.GetState()
+	isLeader := kv.CheckState()
 
 	me := kv.me
 	clerkId := args.ClerkId
@@ -132,8 +155,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.lastWaitingIndex[clerkId] = index
 	kv.lastWaitingCV[clerkId] = cv
 
-	go TimeOutRoutine(cv)
-
 	cv.Wait()
 
 	reply.Value = ""
@@ -156,7 +177,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.mu.Unlock()
 
 	// Your code here.
-	_, isLeader := kv.rf.GetState()
+	//_, isLeader := kv.rf.GetState()
+	isLeader := kv.CheckState()
 
 	me := kv.me
 	clerkId := args.ClerkId
@@ -209,8 +231,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	cv := sync.NewCond(&kv.mu)
 	kv.lastWaitingIndex[clerkId] = index
 	kv.lastWaitingCV[clerkId] = cv
-
-	go TimeOutRoutine(cv)
 
 	cv.Wait()
 
@@ -288,13 +308,9 @@ func (kv *KVServer) ControlDaemon() {
 
 		_, _ = DPrintf("{%v} apply log [%v]: %v", kv.me, applyMsg.CommandIndex, applyMsg.Command)
 
-		if !applyMsg.IsLeader {
-			for k, v := range kv.lastWaitingCV {
-				if v != nil {
-					v.Signal()
-					kv.lastWaitingCV[k] = nil
-				}
-			}
+		if applyMsg.LogTerm > kv.raftTerm {
+			kv.SignalWaitingCV()
+			kv.raftTerm = applyMsg.LogTerm
 		}
 
 		op := applyMsg.Command.(Op)
@@ -352,8 +368,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.readSnapshot(kv.persister.ReadSnapshot())
 	_, _ = DPrintf("{%v} start!", kv.me)
 
+	kv.raftTerm = -1
+
 	go kv.ControlDaemon()
-	// You may need initialization code here.
 
 	return kv
 }

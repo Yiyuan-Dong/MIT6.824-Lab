@@ -52,7 +52,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-	IsLeader     bool
+	LogTerm  	 int
 	Snapshot     []byte
 }
 
@@ -328,7 +328,7 @@ func (rf *Raft) ApplyLogs() {
 					Command: rf.log[i].Command,
 					CommandIndex: i - rf.log[i].NoOpOffset + rf.deleteLogNum,
 					CommandValid: true,
-					IsLeader: rf.state == ConstStateLeader,
+					LogTerm: rf.log[i].Term,
 					Snapshot: nil}
 
 				rf.mu.Unlock()
@@ -445,6 +445,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server, me, currentTerm, lastIndex, lastTerm int) {
 	_, _ = DPrintf("[%v](%v) send RequestVote RPC to [%v]", me, currentTerm, server)
+
 	args := RequestVoteArgs{
 		Term: currentTerm,
 		CandidateId: me,
@@ -1065,6 +1066,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.TimeClick()
 
 	go rf.RaftMain()
+
+	if rf.commitIndex > 0{
+		rf.ApplyLogs()
+	}
 
 	return rf
 }

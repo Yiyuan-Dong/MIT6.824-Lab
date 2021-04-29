@@ -117,6 +117,8 @@ type ShardKV struct {
 	dead             int32
 	lastGetAns       map[int64]string
 	sendOutLogs      [shardmaster.NShards]SendOutLog  // persist
+
+	raftTerm         int
 }
 
 type SendOutLog struct {
@@ -192,17 +194,38 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 }
 
 /**
-这里有点复杂要用中文...
-本来的设计是如果applyCh说我已经不是leader了,那么Signal()所有的
-CV.但是有一种情况是:我写了几个log,新leader来了覆盖了这些log,但是
-还没有来得及apply我又当回了leader.这时候CV没有被提醒,[]waitingIndex
-没有被改变使得这个log明明没有在广播却也不能重新让leader广播.这时候就
-需要超时Signal()机制
+  (现在我用CheckState()处理这种情况了)
+  这里有点复杂要用中文...
+  本来的设计是如果applyCh说我已经不是leader了，那么Signal()所有的
+  CV。但是有一种情况是:我写了几个log，新leader来了覆盖了这些log，但是
+  还没有来得及apply我又当回了leader。这时候CV没有被提醒，[]waitingIndex
+  没有被改变使得这个log明明没有在广播却也不能重新让leader广播。这时候就
+  需要超时Signal()机制
 */
-func TimeOutRoutine(cv *sync.Cond) {
-	timer := time.NewTimer(2 * time.Second)
-	<-timer.C
-	cv.Signal()
+
+//func TimeOutRoutine(cv *sync.Cond) {
+//	timer := time.NewTimer(2 * time.Second)
+//	<-timer.C
+//	cv.Signal()
+//}
+
+func (kv *ShardKV) CheckState() bool {
+	term, isLeader := kv.rf.GetState()
+	if term > kv.raftTerm {
+		kv.SignalWaitingCV()
+		kv.raftTerm = term
+	}
+	return isLeader
+}
+
+func (kv *ShardKV)SignalWaitingCV(){
+	for k, v := range kv.lastWaitingCV {
+		if v != nil {
+			v.Signal()
+			kv.lastWaitingCV[k] = nil
+		}
+	}
+	kv.shardCV.Signal()
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -211,7 +234,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	defer kv.mu.Unlock()
 
 	// Your code here.
-	_, isLeader := kv.rf.GetState()
+	isLeader := kv.CheckState()
 
 	me := kv.me
 	clerkId := args.ClerkId
@@ -272,8 +295,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	kv.lastWaitingCV[clerkId] = cv
 	kv.lastWaitingShard[clerkId] = shardNum
 
-	go TimeOutRoutine(cv)
-
 	cv.Wait()
 
 	reply.Value = ""
@@ -308,7 +329,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.mu.Unlock()
 
 	// Your code here.
-	_, isLeader := kv.rf.GetState()
+	isLeader := kv.CheckState()
 
 	me := kv.me
 	clerkId := args.ClerkId
@@ -378,8 +399,6 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.lastWaitingCV[clerkId] = cv
 	kv.lastWaitingShard[clerkId] = shardNum
 
-	go TimeOutRoutine(cv)
-
 	cv.Wait()
 
 	if kv.lastAppliedIndex[clerkId] >= index {
@@ -437,7 +456,11 @@ func (kv *ShardKV) logConfig(configToLog shardmaster.Config, firstGID int) {
 		Config:     configToLog,
 		FirstGID:   firstGID,
 	}
-	kv.rf.Start(configOp)
+	_, _, isLeader := kv.rf.Start(configOp)
+	if isLeader {
+		CriticalDPrintf("{%v:%v} has log config %v, firstGID: %v",
+			kv.me, kv.gid, configToLog, firstGID)
+	}
 }
 
 func (kv *ShardKV) SendOutShards() {
@@ -537,30 +560,35 @@ func (kv *ShardKV) SendShardRPC(gid int, args SendShardArgs, servers []*labrpc.C
 		CriticalDPrintf("{%v:%v} will send [%v](TS:%v) to {%v}(si:%v), kvMap: %v",
 			me, myGid, shardNum, args.ShardTS, gid, si, args.KvMap)
 
+		// 被抛弃的设计，现在是通过ApplyMsg.LogTerm判断leader的更替
+		//
 		// 有一种神秘的情况是某个server接受了我的shard，结果过了一会儿他不当
 		// raft leader了，我的shard log也尸骨无存，这时候我不能傻等，不然就
 		// 死循环了
 
-		tempCh := make(chan bool)
+		//tempCh := make(chan bool)
+		//
+		//go func() {
+		//	timer := time.NewTimer(1000 * time.Millisecond)
+		//	<- timer.C
+		//	tempCh <- false
+		//	CriticalDPrintf("DRAIN1")
+		//}()
+		//
+		//go func() {
+		//	callRet := server.Call("ShardKV.SendShard", &args, &reply)
+		//	tempCh <- callRet
+		//	CriticalDPrintf("DRAIN2")
+		//}()
+		//
+		//ok := <- tempCh
+		//go func() {
+		//	// drain another goroutine
+		//	<- tempCh
+		//	CriticalDPrintf("Drain3")
+		//}()
 
-		go func() {
-			timer := time.NewTimer(1000 * time.Millisecond)
-			<- timer.C
-			tempCh <- false
-			CriticalDPrintf("DRAIN1")
-		}()
-
-		go func() {
-			callRet := server.Call("ShardKV.SendShard", &args, &reply)
-			tempCh <- callRet
-			CriticalDPrintf("DRAIN2")
-		}()
-
-		ok := <- tempCh
-		go func() {
-			// drain another goroutine
-			<- tempCh
-		}()
+		ok := server.Call("ShardKV.SendShard", &args, &reply)
 
 		if !ok {
 			CriticalDPrintf("{%v:%v} sent [%v](TS:%v) to {%v}(si:%v), failed",
@@ -587,7 +615,6 @@ func (kv *ShardKV) SendShardRPC(gid int, args SendShardArgs, servers []*labrpc.C
 			}
 		}
 
-		// reply.Err == ErrWrongLeader
 		si++
 		continue
 	}
@@ -598,7 +625,7 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	_, isLeader := kv.rf.GetState()
+	isLeader := kv.CheckState()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -606,8 +633,6 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 	reply.Err = OK
 
 	if args.Config.Num > kv.currentConfig.Num {
-		CriticalDPrintf("{%v:%v} log config: %v",
-			kv.me, kv.gid, args.Config)
 		kv.logConfig(args.Config, args.FirstGID)
 	}
 
@@ -650,11 +675,17 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	currentRaftTerm := kv.raftTerm
 
-	// Wait until the KV data is applied
+	// Wait until the KV data is applied or leader changed
 	for {
 		kv.shardCV.Wait()
-		if kv.control[shardNum] {
+		if kv.shardTS[shardNum] >= args.ShardTS {
+			reply.Err = OK
+			return
+		}
+		if kv.raftTerm > currentRaftTerm {
+			reply.Err = ErrWrongLeader
 			return
 		}
 	}
@@ -705,13 +736,9 @@ func (kv *ShardKV) ControlDaemon() {
 		_, _ = DPrintf("{%v:%v} apply log [%v]: %v",
 			kv.me, kv.gid, applyMsg.CommandIndex, applyMsg.Command)
 
-		if !applyMsg.IsLeader {
-			for k, v := range kv.lastWaitingCV {
-				if v != nil {
-					v.Signal()
-					kv.lastWaitingCV[k] = nil
-				}
-			}
+		if applyMsg.LogTerm > kv.raftTerm {
+			kv.SignalWaitingCV()
+			kv.raftTerm = applyMsg.LogTerm
 		}
 
 		op := applyMsg.Command.(Op)
@@ -860,18 +887,16 @@ func (kv *ShardKV) QueryMaster() {
 			kv.me, kv.gid, kv.firstGID, configRet.Num)
 	}
 
-	_, isLeader := kv.rf.GetState()
-	if isLeader && configRet.Num > kv.waitingConfigIdx {
+	if configRet.Num > kv.waitingConfigIdx {
 		kv.duplicateCount = 0
 		kv.waitingConfigIdx = configRet.Num
 		kv.logConfig(configRet, kv.firstGID)
-		CriticalDPrintf("{%v:%v} get config %v", kv.me, kv.gid, configRet)
 		return
 	}
 
 	// 下面这段代码的意义等同于TimeOutRoutine,即写下Log之后失去了
 	// Leader之位,未确认的Config被覆盖,结果不会重新给机会了
-	if isLeader && configRet.Num == kv.waitingConfigIdx &&
+	if configRet.Num == kv.waitingConfigIdx &&
 		kv.currentConfig.Num < kv.waitingConfigIdx {
 		kv.duplicateCount++
 		if kv.duplicateCount == DuplicateConfigCount {
@@ -922,6 +947,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.firstGID = -1
 	kv.initialized = false
 	kv.lastGetAns = map[int64]string{}
+	kv.raftTerm = -1
 
 	if kv.persister.SnapshotSize() > 0 {
 		kv.readSnapshot(kv.persister.ReadSnapshot())
