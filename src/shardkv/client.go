@@ -99,7 +99,7 @@ func (ck *Clerk) Get(key string) string {
 
 				srv := ck.make_end(servers[si])
 				var reply GetReply
-				DPrintf("\"%v\" will now Get(), index: %v", ck.clerkId, ck.index)
+				DPrintf("\"%v\" will Get(), index: %v", ck.clerkId, args.Index)
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
@@ -121,7 +121,7 @@ func (ck *Clerk) Get(key string) string {
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
-		DPrintf("\"%v\" will Query() in Get(), index: %v", ck.clerkId, ck.index)
+		DPrintf("\"%v\" will Query() in Get(), index: %v", ck.clerkId, args.Index)
 		ck.config = ck.sm.Query(-1)
 	}
 
@@ -155,7 +155,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				}
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
-				DPrintf("\"%v\" will PutAppend(), index: %v", ck.clerkId, ck.index)
+				DPrintf("\"%v\" will PutAppend(), index: %v", ck.clerkId, args.Index)
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
 					return
@@ -177,7 +177,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
-		DPrintf("\"%v\" will Query() in PutAppend(), index: %v", ck.clerkId, ck.index)
+		DPrintf("\"%v\" will Query() in PutAppend(), index: %v", ck.clerkId, args.Index)
 		ck.config = ck.sm.Query(-1)
 	}
 }

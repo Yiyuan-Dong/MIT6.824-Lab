@@ -115,7 +115,7 @@ type ShardKV struct {
 	firstGID         int  // persist
 	initialized      bool // persist
 	dead             int32
-	lastGetAns       map[int64]string
+	lastGetAns       map[int64]string  // persist
 	sendOutLogs      [shardmaster.NShards]SendOutLog  // persist
 
 	raftTerm         int
@@ -144,12 +144,14 @@ func (kv *ShardKV) EncodeSnapShot() []byte {
 	e := labgob.NewEncoder(w)
 	if e.Encode(kv.kvMap) != nil ||
 		e.Encode(kv.lastAppliedIndex) != nil ||
+
 		e.Encode(kv.control) != nil ||
 		e.Encode(kv.shardTS) != nil ||
 		e.Encode(kv.currentConfig) != nil ||
 		e.Encode(kv.firstGID) != nil ||
 		e.Encode(kv.initialized) != nil ||
-		e.Encode(kv.sendOutLogs) != nil {
+		e.Encode(kv.sendOutLogs) != nil ||
+		e.Encode(kv.lastGetAns) != nil {
 		log.Fatal("Error while encoding")
 	}
 	data := w.Bytes()
@@ -171,6 +173,7 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	var firstGID int
 	var initialized bool
 	var sendOutLogs [shardmaster.NShards]SendOutLog
+	var lastGetAns map[int64]string
 
 	if d.Decode(&kvMap) != nil ||
 		d.Decode(&lastAppliedIndex) != nil ||
@@ -179,7 +182,8 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 		d.Decode(&currentConfig) != nil ||
 		d.Decode(&firstGID) != nil ||
 		d.Decode(&initialized) != nil ||
-		d.Decode(&sendOutLogs) != nil {
+		d.Decode(&sendOutLogs) != nil ||
+		d.Decode(&lastGetAns) != nil {
 		log.Fatal("Error while decode")
 	} else {
 		kv.kvMap = kvMap
@@ -190,6 +194,7 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 		kv.firstGID = firstGID
 		kv.initialized = initialized
 		kv.sendOutLogs = sendOutLogs
+		kv.lastGetAns = lastGetAns
 	}
 }
 
@@ -557,8 +562,8 @@ func (kv *ShardKV) SendShardRPC(gid int, args SendShardArgs, servers []*labrpc.C
 		server := servers[si]
 
 		var reply SendShardReply
-		CriticalDPrintf("{%v:%v} will send [%v](TS:%v) to {%v}(si:%v), kvMap: %v",
-			me, myGid, shardNum, args.ShardTS, gid, si, args.KvMap)
+		CriticalDPrintf("{%v:%v} will send [%v](TS:%v) to {%v}(si:%v), kvMap: %v, LastGetAns: %v",
+			me, myGid, shardNum, args.ShardTS, gid, si, args.KvMap, args.LastGetAns)
 
 		// 被抛弃的设计，现在是通过ApplyMsg.LogTerm判断leader的更替
 		//
@@ -649,8 +654,8 @@ func (kv *ShardKV) SendShard(args *SendShardArgs, reply *SendShardReply) {
 			}
 	}
 
-	CriticalDPrintf("{%v:%v} will log shard[%v](TS:%v), kvMap: %v",
-		kv.me, kv.gid, args.ShardNum, args.ShardTS, args.KvMap)
+	CriticalDPrintf("{%v:%v} will log shard[%v](TS:%v), kvMap: %v, LastGetAns: %v",
+		kv.me, kv.gid, args.ShardNum, args.ShardTS, args.KvMap, args.LastGetAns)
 	opCommand := Op{
 		ShardNum:         shardNum,
 		KvMap:            map[string]string{},
@@ -767,6 +772,12 @@ func (kv *ShardKV) ControlDaemon() {
 					kv.lastAppliedIndex[k] = v
 					kv.lastGetAns[k] = op.LastGetAns[k]
 				}
+
+				if v == kv.lastAppliedIndex[k] &&
+					kv.lastGetAns[k] != op.LastGetAns[k] {
+					log.Fatalf("{%v:%v}, kv:%v, op:%v",
+						kv.me, kv.gid, kv.lastGetAns, op.LastGetAns)
+				}
 			}
 
 			kv.shardCV.Signal()
@@ -826,10 +837,12 @@ func (kv *ShardKV) ControlDaemon() {
 				switch op.OpString {
 				case OpStringAppend:
 					kv.kvMap[op.Key] = kv.kvMap[op.Key] + op.Value
+					kv.lastGetAns[op.ClerkId] = ""
 				case OpStringPut:
 					kv.kvMap[op.Key] = op.Value
+					kv.lastGetAns[op.ClerkId] = ""
 				case OpStringGet:
-					DPrintf("{%v:%v}, key: %v, kvMap: %v",
+					DPrintf("{%v:%v} Get key: %v, kvMap: %v",
 						kv.me, kv.gid, op.Key, kv.kvMap)
 					value, ok := kv.kvMap[op.Key]
 					if !ok {
