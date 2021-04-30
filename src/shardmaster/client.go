@@ -57,11 +57,14 @@ func (ck *Clerk) Query(num int) Config {
 	args.ClerkId = ck.clerkId
 	ck.mu.Unlock()
 
+	DPrintf("'%v' Query() begin, index: %v", ck.clerkId, ck.index)
+
 	args.Num = num
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply QueryReply
+			//DPrintf("'%v' will Query(), index: %v", ck.clerkId, ck.index)
 			ok := srv.Call("ShardMaster.Query", args, &reply)
 			if ok && reply.WrongLeader == false {
 				ck.mu.Lock()

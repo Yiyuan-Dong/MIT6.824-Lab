@@ -39,7 +39,7 @@ import "sync"
 import "../labgob"
 import "../shardmaster"
 
-const Debug = 1
+const Debug = 0
 const MasterQueryGap = 100 * time.Millisecond
 const SendShardsGap = 500 * time.Millisecond
 const DuplicateConfigCount = 10
@@ -1003,6 +1003,23 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 			kv.QueryMaster()
 			newTimer.Reset(MasterQueryGap)
 			<-newTimer.C
+		}
+	}()
+
+	// 因为每个Term最开始那个nil不会被apply。所以有可能Leader换了,
+	// Log被覆盖了但是server一直不知道。这时候就要定时检查一下状态。
+	go func() {
+		newTimer := time.NewTimer(500 * time.Millisecond)
+		for {
+			<-newTimer.C
+
+			if kv.killed() {
+				return
+			}
+			newTimer.Reset(500 * time.Millisecond)
+			kv.mu.Lock()
+			kv.CheckState()
+			kv.mu.Unlock()
 		}
 	}()
 

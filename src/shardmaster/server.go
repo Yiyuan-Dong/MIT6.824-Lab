@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"time"
 )
 import "../labrpc"
 import "sync"
 import "../labgob"
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -503,6 +504,20 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	// Your code here.
 	go sm.ControlDaemon()
+
+	// 因为每个Term最开始那个nil不会被apply。所以有可能Leader换了,
+	// Log被覆盖了但是server一直不知道。这时候就要定时检查一下状态。
+	go func() {
+		newTimer := time.NewTimer(500 * time.Millisecond)
+		for {
+			<-newTimer.C
+
+			newTimer.Reset(500 * time.Millisecond)
+			sm.mu.Lock()
+			sm.CheckState()
+			sm.mu.Unlock()
+		}
+	}()
 
 	return sm
 }

@@ -8,6 +8,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = 0
@@ -369,6 +370,23 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	_, _ = DPrintf("{%v} start!", kv.me)
 
 	kv.raftTerm = -1
+
+	// 因为每个Term最开始那个nil不会被apply。所以有可能Leader换了,
+	// Log被覆盖了但是server一直不知道。这时候就要定时检查一下状态。
+	go func() {
+		newTimer := time.NewTimer(500 * time.Millisecond)
+		for {
+			<-newTimer.C
+
+			if kv.killed() {
+				return
+			}
+			newTimer.Reset(500 * time.Millisecond)
+			kv.mu.Lock()
+			kv.CheckState()
+			kv.mu.Unlock()
+		}
+	}()
 
 	go kv.ControlDaemon()
 
